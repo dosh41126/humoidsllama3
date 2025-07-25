@@ -413,6 +413,33 @@ crypto = SecureKeyManager()
 
 
 
+def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_input: str) -> float:
+    """
+    Score a candidate using sentiment proximity + lexical overlap.
+    """
+    if not candidate_text:
+        return -1.0
+
+    try:
+        cand_sent = TextBlob(candidate_text).sentiment.polarity
+    except Exception:
+        cand_sent = 0.0
+
+    # Sentiment closeness (1 = perfect)
+    sentiment_score = 1.0 - abs(cand_sent - target_sentiment)
+
+    # Lexical overlap on verbs + nouns
+    base_terms = set(extract_verbs_and_nouns(cleaned_input.lower()))
+    cand_terms = set(extract_verbs_and_nouns(candidate_text.lower()))
+    if base_terms and cand_terms:
+        overlap = len(base_terms & cand_terms) / len(base_terms | cand_terms)
+    else:
+        overlap = 0.0
+
+    # Weighted combination
+    return 0.6 * sentiment_score + 0.4 * overlap
+
+
 def build_record_aad(user_id: str, *, source: str, table: str = "", cls: str = "") -> bytes:
 
     context_parts = [source]
@@ -806,7 +833,6 @@ def fetch_relevant_info(chunk, client, user_input):
         logger.error(f"Weaviate query failed: {e}")
         return ""
 
-
 def llama_generate(prompt, weaviate_client=None, user_input=None, temperature=1.0, top_p=0.9):
     config = load_config()
     max_tokens = config.get('MAX_TOKENS', 2500)
@@ -821,7 +847,14 @@ def llama_generate(prompt, weaviate_client=None, user_input=None, temperature=1.
             relevant_info = fetch_relevant_info(current_chunk, weaviate_client, user_input)
             combined_chunk = f"{relevant_info} {current_chunk}"
             token = determine_token(combined_chunk, memory)
-            output = tokenize_and_generate(combined_chunk, token, max_tokens, chunk_size, temperature, top_p)
+            output = tokenize_and_generate(
+                combined_chunk,
+                token,
+                max_tokens,
+                chunk_size,
+                temperature,
+                top_p
+            )
 
             if output is None:
                 logger.error(f"Failed to generate output for chunk: {combined_chunk}")
@@ -843,22 +876,28 @@ def llama_generate(prompt, weaviate_client=None, user_input=None, temperature=1.
         return None
 
 
-def tokenize_and_generate(chunk, token, max_tokens, chunk_size):
-   try:
-       inputs = llm(f"[{token}] {chunk}", max_tokens=min(max_tokens, chunk_size))
-       if inputs is None or not isinstance(inputs, dict):
-           logger.error(f"Llama model returned invalid output for input: {chunk}")
-           return None
+def tokenize_and_generate(chunk, token, max_tokens, chunk_size, temperature=1.0, top_p=0.9):
+    try:
+        inputs = llm(
+            f"[{token}] {chunk}",
+            max_tokens=min(max_tokens, chunk_size),
+            temperature=temperature,
+            top_p=top_p
+        )
+        if inputs is None or not isinstance(inputs, dict):
+            logger.error(f"Llama model returned invalid output for input: {chunk}")
+            return None
 
-       choices = inputs.get('choices', [])
-       if not choices or not isinstance(choices[0], dict):
-           logger.error("No valid choices in Llama output")
-           return None
+        choices = inputs.get('choices', [])
+        if not choices or not isinstance(choices[0], dict):
+            logger.error("No valid choices in Llama output")
+            return None
 
-       return choices[0].get('text', '')
-   except Exception as e:
-       logger.error(f"Error in tokenize_and_generate: {e}")
-       return None
+        return choices[0].get('text', '')
+    except Exception as e:
+        logger.error(f"Error in tokenize_and_generate: {e}")
+        return None
+
 
 def extract_verbs_and_nouns(text):
     try:
@@ -1194,7 +1233,6 @@ class App(customtkinter.CTk):
 
         return mapped_classes
 
-
     def generate_response(self, user_input):
         try:
             if not user_input:
@@ -1205,7 +1243,6 @@ class App(customtkinter.CTk):
             bot_id = self.bot_id
             save_user_message(user_id, user_input)
 
-            # Context marker
             include_past_context = "[pastcontext]" in user_input.lower()
             cleaned_input = sanitize_text(user_input.replace("[pastcontext]", ""), max_len=2000)
 
@@ -1215,59 +1252,83 @@ class App(customtkinter.CTk):
                 self.retrieve_past_interactions(cleaned_input, result_queue)
                 interactions = result_queue.get()
                 if interactions:
-                    past_context = "\n".join([
-                        f"User: {i['user_message']}\nAI: {i['ai_response']}" for i in interactions
-                    ])[-1500:]
+                    past_context = "\n".join(
+                        f"User: {i['user_message']}\nAI: {i['ai_response']}"
+                        for i in interactions
+                    )[-1500:]
 
-            # Quantum State from input sentiment
+            # Quantum state derivation
             rgb = extract_rgb_from_text(cleaned_input)
             r, g, b = [c / 255 for c in rgb]
             cpu = psutil.cpu_percent(interval=0.3) / 100.0
-
             z0, z1, z2 = rgb_quantum_gate(r, g, b, cpu)
+
             bias_factor = (z0 + z1 + z2) / 3.0
-            temperature = max(0.2, min(1.5, 1.0 + bias_factor))
-            top_p = max(0.2, min(1.0, 0.9 - 0.5 * abs(bias_factor)))
+            base_temperature = max(0.2, min(1.5, 1.0 + bias_factor))
+            base_top_p = max(0.2, min(1.0, 0.9 - 0.5 * abs(bias_factor)))
 
             quantum_state = self.generate_quantum_state(rgb=rgb)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Compose prompt
+            # Candidate generation (ensemble)
+            target_sentiment = TextBlob(cleaned_input).sentiment.polarity
+            num_candidates = 4
+            candidates = []
+
+            # Shared prompt skeleton
             prompt_parts = [
                 f"[QuantumStateInfo]\n{quantum_state}",
                 f"[QuantumZAlignment]\nZ0={z0:.3f}, Z1={z1:.3f}, Z2={z2:.3f}",
-                f"[Biasing]\nTemperature={temperature:.2f}, TopP={top_p:.2f}",
             ]
-
             if past_context:
                 prompt_parts.append(f"[ContextHistory]\n{past_context}")
-
             prompt_parts.append(f"[User]\n{cleaned_input}")
             prompt_parts.append("[Assistant]")
+            base_prompt = "\n\n".join(prompt_parts)
 
-            final_prompt = "\n\n".join(prompt_parts)
-            logger.info(f"[generate_response] Final prompt:\n{final_prompt}")
+            for i in range(num_candidates):
+                # Jitter parameters
+                t = max(0.2, min(1.5, base_temperature + random.uniform(-0.15, 0.15)))
+                p = max(0.2, min(1.0, base_top_p + random.uniform(-0.1, 0.1)))
 
-            response = llama_generate(
-                final_prompt,
-                weaviate_client=self.client,
-                user_input=cleaned_input,
-                temperature=temperature,
-                top_p=top_p,
-            )
+                prompt_with_bias = base_prompt + f"\n\n[Biasing]\nTemperature={t:.2f}, TopP={p:.2f} (candidate {i+1})"
 
-            if response:
-                logger.info(f"[generate_response] Response: {response}")
-                save_bot_response(bot_id, response)
-                self.response_queue.put({'type': 'text', 'data': response})
-            else:
-                logger.warning("LLaMA returned no response.")
+                resp = llama_generate(
+                    prompt_with_bias,
+                    weaviate_client=self.client,
+                    user_input=cleaned_input,
+                    temperature=t,
+                    top_p=p
+                )
+
+                if resp:
+                    score = evaluate_candidate(resp, target_sentiment, cleaned_input)
+                    candidates.append({
+                        "response": resp,
+                        "score": score,
+                        "temperature": t,
+                        "top_p": p
+                    })
+
+            if not candidates:
+                logger.warning("No candidates produced.")
                 self.response_queue.put({'type': 'text', 'data': '[No response generated]'})
+                return
+
+            # Select best candidate
+            best = max(candidates, key=lambda c: c["score"])
+
+            debug_meta = (
+                f"[EnsembleCollapse] Chosen score={best['score']:.3f} "
+                f"T={best['temperature']:.2f} TopP={best['top_p']:.2f}"
+            )
+            final_output = f"{debug_meta}\n{best['response']}"
+
+            save_bot_response(bot_id, final_output)
+            self.response_queue.put({'type': 'text', 'data': final_output})
 
         except Exception as e:
             logger.error(f"[generate_response] Error: {e}")
-            self.response_queue.put({'type': 'text', 'data': f"[Error] {e}"})
-
+            self.response_queue.put({'type': 'text', 'data': f'[Error] {e}'})
 
 
     def process_generated_response(self, response_text):
