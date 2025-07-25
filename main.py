@@ -51,10 +51,11 @@ VAULT_VERSION             = 1
 DATA_KEY_VERSION          = 1         
 VAULT_NONCE_SIZE          = 12    
 DATA_NONCE_SIZE           = 12
-AGING_T0_DAYS = 7.0          # base half‑life (t0)
-AGING_GAMMA_DAYS = 5.0       # gamma coefficient (γ)
-AGING_PURGE_THRESHOLD = 0.5  # delete crystallized phrase if score drops below
-AGING_INTERVAL_SECONDS = 3600  # run aging job every hour
+AGING_T0_DAYS = 7.0          
+AGING_GAMMA_DAYS = 5.0       
+AGING_PURGE_THRESHOLD = 0.5  
+AGING_INTERVAL_SECONDS = 3600  
+
 def _aad_str(*parts: str) -> bytes:
     return ("|".join(parts)).encode("utf-8")
 
@@ -253,7 +254,6 @@ class AdvancedHomomorphicVectorMemory:
                 return np.zeros(self.DIM, dtype=np.float32)
             quant = obj.get("data", [])
             rotated = self._dequantize(quant)
-            # Inverse rotation = transpose (orthonormal)
             original = self.rotation.T @ rotated
             return original
         except Exception as e:
@@ -780,7 +780,6 @@ def init_db():
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cur = conn.cursor()
-            # Add aging_last column if not present (optional)
             cur.execute("PRAGMA table_info(memory_osmosis)")
             cols = {row[1] for row in cur.fetchall()}
             if "aging_last" not in cols:
@@ -1105,13 +1104,14 @@ class App(customtkinter.CTk):
         self.client = weaviate.Client(url=WEAVIATE_ENDPOINT)
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.last_z = (0.0, 0.0, 0.0)
-                # Start aging scheduler
         self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)
+
     def memory_aging_scheduler(self):
-        """Tkinter periodic callback to run aging job."""
+
         self.run_long_term_memory_aging()
-        # reschedule
-        self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)
+
+        self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)\
+
     def __exit__(self, exc_type, exc_value, traceback):
         self.executor.shutdown(wait=True)
 
@@ -1140,8 +1140,6 @@ class App(customtkinter.CTk):
         except Exception as e:
             logger.error(f"An error occurred while retrieving interactions: {e}")
             result_queue.put([])
-
-    # ---------- Long-Term Memory Aging Helpers ----------
 
     def _weaviate_find_ltm(self, phrase: str):
         """Return (uuid, score, crystallized_time) for a LongTermMemory phrase or (None, None, None)."""
@@ -1196,17 +1194,11 @@ class App(customtkinter.CTk):
             logger.error(f"[Aging] delete failed for {uuid_str}: {e}")
 
     def run_long_term_memory_aging(self):
-        """
-        Periodically decay crystallized phrase scores using half-life formula:
-            t_half(p) = t0 + gamma * log(1 + s_p)
-        Score decays exponentially since last aging timestamp.
-        If score < AGING_PURGE_THRESHOLD -> remove from Weaviate & mark uncrystallized locally.
-        """
+
         try:
             now = datetime.utcnow()
             with sqlite3.connect(DB_NAME) as conn:
                 cur = conn.cursor()
-                # Prefer aging_last column, fallback to last_updated
                 try:
                     cur.execute("""SELECT phrase, score,
                                           COALESCE(aging_last, last_updated) AS ts,
@@ -1214,7 +1206,7 @@ class App(customtkinter.CTk):
                                    FROM memory_osmosis
                                    WHERE crystallized=1""")
                 except sqlite3.OperationalError:
-                    # aging_last may not exist
+
                     cur.execute("""SELECT phrase, score, last_updated AS ts, crystallized
                                    FROM memory_osmosis
                                    WHERE crystallized=1""")
@@ -1224,7 +1216,7 @@ class App(customtkinter.CTk):
                     if not ts:
                         continue
                     try:
-                        # parse timestamp (strip trailing Z if present)
+
                         base_dt = datetime.fromisoformat(ts.replace("Z", ""))
                     except Exception:
                         continue
@@ -1232,20 +1224,18 @@ class App(customtkinter.CTk):
                     if delta_days <= 0:
                         continue
 
-                    # half-life based on CURRENT score
+
                     import math
                     half_life = AGING_T0_DAYS + AGING_GAMMA_DAYS * math.log(1.0 + max(score, 0.0))
                     if half_life <= 0:
                         continue
 
-                    # exponential decay for this interval
                     decay_factor = 0.5 ** (delta_days / half_life)
                     new_score = score * decay_factor
 
                     uuid_str, weav_score, _ = self._weaviate_find_ltm(phrase)
 
                     if new_score < AGING_PURGE_THRESHOLD:
-                        # Purge: remove from Weaviate + mark uncrystallized
                         if uuid_str:
                             self._weaviate_delete_ltm(uuid_str)
                         cur.execute("""UPDATE memory_osmosis
@@ -1254,7 +1244,7 @@ class App(customtkinter.CTk):
                                     (new_score, now.isoformat() + "Z", phrase))
                         logger.info(f"[Aging] Purged crystallized phrase '{phrase}' (decayed to {new_score:.3f}).")
                     else:
-                        # Update local + remote
+
                         cur.execute("""UPDATE memory_osmosis
                                        SET score=?, aging_last=?
                                        WHERE phrase=?""",
@@ -1443,12 +1433,7 @@ class App(customtkinter.CTk):
             return []
 
     def quantum_memory_osmosis(self, user_message: str, ai_response: str):
-        """
-        Quantum Memory Osmosis:
-        - Decays existing phrase scores.
-        - Updates scores for phrases extracted from current exchange.
-        - Crystallizes high‑score phrases into LongTermMemory (Weaviate).
-        """
+
         try:
             phrases_user = set(self.extract_keywords(user_message))
             phrases_ai = set(self.extract_keywords(ai_response))
