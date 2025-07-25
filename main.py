@@ -44,8 +44,8 @@ ARGON2_TIME_COST_DEFAULT = 3
 ARGON2_MEMORY_COST_KIB    = 262144   
 ARGON2_PARALLELISM        = max(1, min(4, os.cpu_count() or 1))
 ARGON2_HASH_LEN           = 32
-CRYSTALLIZE_THRESHOLD = 5     # score needed to promote phrase to long‑term memory
-DECAY_FACTOR = 0.95           # multiplicative decay applied each interaction
+CRYSTALLIZE_THRESHOLD = 5    
+DECAY_FACTOR = 0.95          
 VAULT_PASSPHRASE_ENV      = "VAULT_PASSPHRASE"
 VAULT_VERSION             = 1        
 DATA_KEY_VERSION          = 1         
@@ -161,7 +161,6 @@ WEAVIATE_ENDPOINT = config['WEAVIATE_ENDPOINT']
 WEAVIATE_QUERY_PATH = config['WEAVIATE_QUERY_PATH']
 
 
-# === Advanced Homomorphic Vector Memory v2 ===
 class SecureEnclave:
     """
     Context manager to 'contain' decrypted embeddings.
@@ -176,7 +175,6 @@ class SecureEnclave:
         return buf
 
     def __exit__(self, exc_type, exc, tb):
-        # Zero sensitive arrays
         for b in self._buffers:
             try:
                 if isinstance(b, np.ndarray):
@@ -195,20 +193,19 @@ class AdvancedHomomorphicVectorMemory:
     """
     AAD_CONTEXT = _aad_str("fhe", "embeddingv2")
     DIM = 64
-    QUANT_SCALE = 127.0  # for int8 simulation
+    QUANT_SCALE = 127.0  
 
     def __init__(self):
-        # Derive deterministic rotation matrix from vault key material
+
         master_key = crypto._derived_keys[crypto.active_version]
         seed = int.from_bytes(hashlib.sha256(master_key).digest()[:8], "big")
         rng = np.random.default_rng(seed)
-        # Generate random matrix and QR-decompose to orthonormal
+
         A = rng.normal(size=(self.DIM, self.DIM))
         Q, _ = np.linalg.qr(A)
-        self.rotation = Q  # orthonormal
+        self.rotation = Q  
 
-        # Pre-generate random hyperplanes for SimHash
-        self.lsh_planes = rng.normal(size=(16, self.DIM))  # 16-bit signature
+        self.lsh_planes = rng.normal(size=(16, self.DIM)) 
 
     def _rotate(self, vec: np.ndarray) -> np.ndarray:
         return self.rotation @ vec
@@ -222,16 +219,15 @@ class AdvancedHomomorphicVectorMemory:
         return arr
 
     def _simhash_bucket(self, rotated_vec: np.ndarray) -> str:
-        # Compute sign bits of projections
         dots = self.lsh_planes @ rotated_vec
         bits = ["1" if d >= 0 else "0" for d in dots]
-        return "".join(bits)  # 16-bit string
+        return "".join(bits) 
 
     def encrypt_embedding(self, vec: list[float]) -> tuple[str, str]:
         try:
             arr = np.array(vec, dtype=np.float32)
             if arr.shape[0] != self.DIM:
-                # Pad or trim
+
                 if arr.shape[0] < self.DIM:
                     arr = np.concatenate([arr, np.zeros(self.DIM - arr.shape[0])])
                 else:
@@ -536,11 +532,8 @@ class SecureKeyManager:
 crypto = SecureKeyManager()  
 
 
-
 def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_input: str) -> float:
-    """
-    Score a candidate using sentiment proximity + lexical overlap.
-    """
+
     if not candidate_text:
         return -1.0
 
@@ -549,10 +542,8 @@ def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_inp
     except Exception:
         cand_sent = 0.0
 
-    # Sentiment closeness (1 = perfect)
     sentiment_score = 1.0 - abs(cand_sent - target_sentiment)
 
-    # Lexical overlap on verbs + nouns
     base_terms = set(extract_verbs_and_nouns(cleaned_input.lower()))
     cand_terms = set(extract_verbs_and_nouns(candidate_text.lower()))
     if base_terms and cand_terms:
@@ -560,7 +551,6 @@ def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_inp
     else:
         overlap = 0.0
 
-    # Weighted combination
     return 0.6 * sentiment_score + 0.4 * overlap
 
 
@@ -612,7 +602,7 @@ def is_valid_uuid(uuid_to_test, version=5):
     
 def fetch_live_weather(lat: float, lon: float, fallback_temp_f: float = 70.0) -> tuple[float, int, bool]:
     try:
-        import httpx  # make sure it's imported
+        import httpx 
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
         with httpx.Client(timeout=5.0) as client:
             response = client.get(url)
@@ -622,7 +612,7 @@ def fetch_live_weather(lat: float, lon: float, fallback_temp_f: float = 70.0) ->
             temp_c = float(current.get("temperature", 20.0))
             temp_f = (temp_c * 9 / 5) + 32
             weather_code = int(current.get("weathercode", 0))
-            return temp_f, weather_code, True  # True = live data used
+            return temp_f, weather_code, True 
     except Exception as e:
         logger.warning(f"[Weather] Fallback due to error: {e}")
         return fallback_temp_f, 0, False
@@ -755,7 +745,6 @@ def init_db():
             )
         """)
 
-        # Table for Quantum Memory Osmosis
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS memory_osmosis (
                 phrase TEXT PRIMARY KEY,
@@ -767,7 +756,6 @@ def init_db():
         conn.commit()
         conn.close()
 
-        # Create/ensure InteractionHistory class
         interaction_history_class = {
             "class": "InteractionHistory",
             "properties": [
@@ -777,7 +765,6 @@ def init_db():
             ]
         }
 
-        # New LongTermMemory class for crystallized phrases
         long_term_memory_class = {
             "class": "LongTermMemory",
             "properties": [
@@ -947,7 +934,6 @@ def fetch_relevant_info(chunk, client, user_input):
             return ""
 
         query_vec = np.array(compute_text_embedding(user_input), dtype=np.float32)
-        # Derive same bucket for query
         rotated = fhe_v2._rotate(query_vec)
         bucket = fhe_v2._simhash_bucket(rotated)
 
@@ -1144,24 +1130,24 @@ class App(customtkinter.CTk):
             logger.error(f"An error occurred while retrieving interactions: {e}")
             result_queue.put([])
 
-    async def _get_live_weather(self, lat: float, lon: float):
-        async with OpenMeteo() as om:
-            resp = await om.forecast(
-                latitude=lat,
-                longitude=lon,
-                current_weather=True
-            )
-            return resp.current_weather.temperature, resp.current_weather.weather_code
 
     def get_weather_sync(self, lat, lon):
+
         try:
-            return asyncio.run(self._get_live_weather(lat, lon))
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+            with httpx.Client(timeout=5.0) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                data = response.json()
+
+            current = data.get("current_weather", {})
+            temp_c = float(current.get("temperature", 20.0))
+            weather_code = int(current.get("weathercode", 0))
+            return temp_c, weather_code
         except Exception as e:
-            logger.error(f"Weather fetch failed: {e}")
+            logger.error(f"[Weather] Fetch failed: {e}")
             return None, None
 
-
-           
     def generate_quantum_state(self, rgb=None):
         if rgb is None or not isinstance(rgb, tuple) or len(rgb) != 3:
             rgb = (128, 128, 128)
@@ -1261,7 +1247,6 @@ class App(customtkinter.CTk):
                 response = self.client.query.raw(query)
                 data_root = response.get('data', {}).get('Get', {})
 
-                # Prefer recent InteractionHistory
                 hist_list = data_root.get('InteractionHistory', [])
                 if hist_list:
                     interaction = hist_list[0]
@@ -1271,12 +1256,10 @@ class App(customtkinter.CTk):
                     ai_resp = sanitize_text(ai_resp_raw, max_len=4000)
                     return user_msg, ai_resp
 
-                # Fallback: LongTermMemory phrase
                 ltm_list = data_root.get('LongTermMemory', [])
                 if ltm_list:
                     phrase_obj = ltm_list[0]
                     phrase = sanitize_text(phrase_obj.get('phrase', ''), max_len=400)
-                    # treat phrase as pseudo "user_message" context
                     return phrase, ""
 
                 return "", ""
@@ -1343,11 +1326,11 @@ class App(customtkinter.CTk):
             with sqlite3.connect(DB_NAME) as conn:
                 cur = conn.cursor()
 
-                # Apply global decay to all existing rows
+
                 cur.execute("UPDATE memory_osmosis SET score = score * ?, last_updated = ?",
                             (DECAY_FACTOR, now_iso))
 
-                # Upsert each phrase with +1 score increment
+  
                 for phrase in all_phrases:
                     cur.execute("SELECT score, crystallized FROM memory_osmosis WHERE phrase = ?", (phrase,))
                     row = cur.fetchone()
@@ -1364,7 +1347,7 @@ class App(customtkinter.CTk):
                             (phrase, new_score, now_iso)
                         )
 
-                    # If threshold reached and not yet crystallized -> promote to Weaviate
+
                     if new_score >= CRYSTALLIZE_THRESHOLD and not crystallized:
                         try:
                             self.client.data_object.create(
@@ -1499,7 +1482,7 @@ class App(customtkinter.CTk):
                         for i in interactions
                     )[-1500:]
 
-            # Quantum state derivation
+
             rgb = extract_rgb_from_text(cleaned_input)
             r, g, b = [c / 255 for c in rgb]
             cpu = psutil.cpu_percent(interval=0.3) / 100.0
@@ -1511,12 +1494,12 @@ class App(customtkinter.CTk):
 
             quantum_state = self.generate_quantum_state(rgb=rgb)
 
-            # Candidate generation (ensemble)
+
             target_sentiment = TextBlob(cleaned_input).sentiment.polarity
             num_candidates = 4
             candidates = []
 
-            # Shared prompt skeleton
+
             prompt_parts = [
                 f"[QuantumStateInfo]\n{quantum_state}",
                 f"[QuantumZAlignment]\nZ0={z0:.3f}, Z1={z1:.3f}, Z2={z2:.3f}",
@@ -1528,7 +1511,7 @@ class App(customtkinter.CTk):
             base_prompt = "\n\n".join(prompt_parts)
 
             for i in range(num_candidates):
-                # Jitter parameters
+
                 t = max(0.2, min(1.5, base_temperature + random.uniform(-0.15, 0.15)))
                 p = max(0.2, min(1.0, base_top_p + random.uniform(-0.1, 0.1)))
 
@@ -1559,7 +1542,7 @@ class App(customtkinter.CTk):
                 self.response_queue.put({'type': 'text', 'data': '[No response generated]'})
                 return
 
-            # Select best candidate
+
             best = max(candidates, key=lambda c: c["score"])
             debug_meta = (
                 f"[EnsembleCollapse] Chosen score={best['score']:.3f} "
@@ -1567,7 +1550,7 @@ class App(customtkinter.CTk):
             )
             final_output = f"{debug_meta}\n{best['response']}"
 
-            # ---- Quantum Memory Osmosis integration ----
+
             try:
                 self.quantum_memory_osmosis(cleaned_input, best['response'])
             except Exception as osm_e:
