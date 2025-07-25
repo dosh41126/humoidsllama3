@@ -1194,6 +1194,7 @@ class App(customtkinter.CTk):
 
         return mapped_classes
 
+
     def generate_response(self, user_input):
         try:
             if not user_input:
