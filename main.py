@@ -61,15 +61,17 @@ def _aad_str(*parts: str) -> bytes:
     return ("|".join(parts)).encode("utf-8")
 
 customtkinter.set_appearance_mode("Dark")
-
 nltk.data.path.append("/root/nltk_data")
 
 def download_nltk_data():
     try:
-
         resources = {
             'tokenizers/punkt': 'punkt',
-            'taggers/averaged_perceptron_tagger': 'averaged_perceptron_tagger'
+            'taggers/averaged_perceptron_tagger': 'averaged_perceptron_tagger',
+            'corpora/brown': 'brown',
+            'corpora/wordnet': 'wordnet',
+            'corpora/stopwords': 'stopwords',
+            'corpora/conll2000': 'conll2000'
         }
 
         for path_, package in resources.items():
@@ -82,6 +84,7 @@ def download_nltk_data():
 
     except Exception as e:
         print(f"Error downloading NLTK data: {e}")
+
 
 download_nltk_data()
         
@@ -105,12 +108,9 @@ def load_config(file_path=path_to_config):
 q = queue.Queue()
 logger = logging.getLogger(__name__)
 config = load_config()
-
 SAFE_ALLOWED_TAGS: list[str] = []
 SAFE_ALLOWED_ATTRS: dict[str, list[str]] = {}
 SAFE_ALLOWED_PROTOCOLS: list[str] = []
-
-
 _CONTROL_WHITELIST = {'\n', '\r', '\t'}
 
 def _strip_control_chars(s: str) -> str:
@@ -300,7 +300,6 @@ class SecureKeyManager:
         for ver, master_secret in self._keys.items():
             self._derived_keys[ver] = self._derive_key(master_secret, vault_salt)
 
-
     def _get_passphrase(self) -> bytes:
 
         pw = os.getenv(VAULT_PASSPHRASE_ENV)
@@ -404,12 +403,10 @@ class SecureKeyManager:
             }
             self._write_encrypted_vault(vault_body)
             return vault_body
-
  
         salt      = base64.b64decode(data["salt"])
         nonce     = base64.b64decode(data["nonce"])
         ct        = base64.b64decode(data["ciphertext"])
-
         passphrase = self._get_passphrase()
         vault_key  = self._derive_vault_key(passphrase, salt)
         aesgcm     = AESGCM(vault_key)
@@ -469,7 +466,6 @@ class SecureKeyManager:
             aesgcm = AESGCM(key)
             pt     = aesgcm.decrypt(n, ct, aad)
             return pt.decode("utf-8")
-
 
         try:
             raw   = base64.b64decode(token.encode())
@@ -694,7 +690,6 @@ class TopologicalMemoryManifold:
         return [self._phrases[i] for i in order[:k]]
 
 topo_manifold = TopologicalMemoryManifold()
-
 fhe_v2 = AdvancedHomomorphicVectorMemory()
 
 def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_input: str) -> float:
@@ -708,7 +703,6 @@ def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_inp
         cand_sent = 0.0
 
     sentiment_score = 1.0 - abs(cand_sent - target_sentiment)
-
     base_terms = set(extract_verbs_and_nouns(cleaned_input.lower()))
     cand_terms = set(extract_verbs_and_nouns(candidate_text.lower()))
     if base_terms and cand_terms:
@@ -858,32 +852,22 @@ def extract_rgb_from_text(text):
     blob = TextBlob(text)
     polarity = blob.sentiment.polarity 
     subjectivity = blob.sentiment.subjectivity 
-
     tokens = word_tokenize(text)
     pos_tags = pos_tag(tokens)
-
     word_count = len(tokens)
     sentence_count = len(blob.sentences) or 1
     avg_sentence_length = word_count / sentence_count
-
     adj_count = sum(1 for _, tag in pos_tags if tag.startswith('JJ'))
     adv_count = sum(1 for _, tag in pos_tags if tag.startswith('RB'))
     verb_count = sum(1 for _, tag in pos_tags if tag.startswith('VB'))
     noun_count = sum(1 for _, tag in pos_tags if tag.startswith('NN'))
-
     punctuation_density = sum(1 for ch in text if ch in ',;:!?') / max(1, word_count)
-
     valence = polarity 
-
     arousal = (verb_count + adv_count) / max(1, word_count)
-
     dominance = (adj_count + 1) / (noun_count + 1) 
-
     hue_raw = ((1 - valence) * 120 + dominance * 20) % 360
     hue = hue_raw / 360.0
-
     saturation = min(1.0, max(0.2, 0.25 + 0.4 * arousal + 0.2 * subjectivity + 0.15 * (dominance - 1)))
-
     brightness = max(0.2, min(1.0,
         0.9 - 0.03 * avg_sentence_length + 0.2 * punctuation_density
     ))
@@ -1342,15 +1326,10 @@ class App(customtkinter.CTk):
     def _policy_sample(self, bias_factor: float):
 
         mu_t, sigma_t, mu_p, sigma_p, cache = self._policy_forward(bias_factor)
-
-
         t_sample = random.gauss(mu_t, sigma_t)
         p_sample = random.gauss(mu_p, sigma_p)
-
         t_clip = max(0.2, min(1.5, t_sample))
         p_clip = max(0.2, min(1.0, p_sample))
-
-
         log_prob_t = -0.5 * ((t_sample - mu_t) ** 2 / (sigma_t ** 2)) - math.log(sigma_t) - 0.5 * math.log(2 * math.pi)
         log_prob_p = -0.5 * ((p_sample - mu_p) ** 2 / (sigma_p ** 2)) - math.log(sigma_p) - 0.5 * math.log(2 * math.pi)
         log_prob = log_prob_t + log_prob_p
@@ -1384,30 +1363,23 @@ class App(customtkinter.CTk):
             rt = s["raw_temperature"]; rp = s["raw_top_p"]
             cache = s["cache"]
             bias_factor = s.get("bias_factor", 0.0)
-
             inv_var_t = 1.0 / (sigma_t ** 2)
             inv_var_p = 1.0 / (sigma_p ** 2)
             diff_t = (rt - mu_t)
             diff_p = (rp - mu_p)
-
             dlogp_dmu_t = diff_t * inv_var_t
             dlogp_dmu_p = diff_p * inv_var_p
-
             dlogp_dlogsigma_t = (diff_t ** 2 / (sigma_t ** 2)) - 1.0
             dlogp_dlogsigma_p = (diff_p ** 2 / (sigma_p ** 2)) - 1.0
-
             sig_t = cache["sig_t"]; t_range = cache["t_range"]
             dsig_t_draw_t = sig_t * (1 - sig_t)
             dmu_t_draw_t = dsig_t_draw_t * t_range
-
             sig_p = cache["sig_p"]; p_range = cache["p_range"]
             dsig_p_draw_p = sig_p * (1 - sig_p)
             dmu_p_draw_p = dsig_p_draw_p * p_range
-
             grads["temp_w"] += advantage * dlogp_dmu_t * dmu_t_draw_t * bias_factor
             grads["temp_b"] += advantage * dlogp_dmu_t * dmu_t_draw_t
             grads["temp_log_sigma"] += advantage * dlogp_dlogsigma_t
-
             grads["top_w"] += advantage * dlogp_dmu_p * dmu_p_draw_p * bias_factor
             grads["top_b"] += advantage * dlogp_dmu_p * dmu_p_draw_p
             grads["top_log_sigma"] += advantage * dlogp_dlogsigma_p
@@ -1494,6 +1466,7 @@ class App(customtkinter.CTk):
             )
         except Exception as e:
             logger.error(f"[Aging] delete failed for {uuid_str}: {e}")
+
     def run_long_term_memory_aging(self):
 
         try:
@@ -2291,7 +2264,6 @@ class App(customtkinter.CTk):
         customtkinter.CTkLabel(self.context_frame, text="Lottery Type:").grid(row=4, column=0, padx=5, pady=5)
         self.lottery_type_entry = customtkinter.CTkEntry(self.context_frame, width=200, placeholder_text="e.g. Powerball")
         self.lottery_type_entry.grid(row=4, column=1, columnspan=3, padx=5, pady=5)
-
 
 if __name__ == "__main__":
     try:
