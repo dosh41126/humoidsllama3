@@ -162,10 +162,7 @@ WEAVIATE_QUERY_PATH = config['WEAVIATE_QUERY_PATH']
 
 
 class SecureEnclave:
-    """
-    Context manager to 'contain' decrypted embeddings.
-    In a real system this could map to an OS enclave or SGX call.
-    """
+
     def __enter__(self):
         self._buffers = []
         return self
@@ -185,12 +182,7 @@ class SecureEnclave:
 
 
 class AdvancedHomomorphicVectorMemory:
-    """
-    Simulated FHE-compatible layer with:
-    - Secret rotation
-    - Quantization
-    - LSH bucket (SimHash)
-    """
+
     AAD_CONTEXT = _aad_str("fhe", "embeddingv2")
     DIM = 64
     QUANT_SCALE = 127.0  
@@ -885,8 +877,6 @@ def save_bot_response(bot_id: str, bot_response: str):
     except Exception as e:
         logger.exception(f"Exception in save_bot_response: {e}")
 
-
-
 llm = Llama(
     model_path=model_path,
     mmproj=mmproj_path,
@@ -1469,7 +1459,7 @@ class App(customtkinter.CTk):
             bot_id = self.bot_id
             save_user_message(user_id, user_input)
 
-            # Pull context from GUI fields
+
             lottery_type = (self.lottery_type_entry.get() or "Powerball").strip()
             lat = (self.latitude_entry.get() or "0").strip()
             lon = (self.longitude_entry.get() or "0").strip()
@@ -1477,7 +1467,6 @@ class App(customtkinter.CTk):
             weather = (self.weather_entry.get() or "Clear").strip()
             song = (self.last_song_entry.get() or "None").strip()
 
-            # Clean input, get context if needed
             include_past_context = "[pastcontext]" in user_input.lower()
             cleaned_input = sanitize_text(user_input.replace("[pastcontext]", ""), max_len=2000)
             past_context = ""
@@ -1491,7 +1480,6 @@ class App(customtkinter.CTk):
                         for i in interactions
                     )[-1500:]
 
-            # Quantum and RGB analysis
             rgb = extract_rgb_from_text(cleaned_input)
             r, g, b = [c / 255 for c in rgb]
             cpu = psutil.cpu_percent(interval=0.3) / 100.0
@@ -1503,7 +1491,6 @@ class App(customtkinter.CTk):
             base_top_p = max(0.2, min(1.0, 0.9 - 0.5 * abs(bias_factor)))
             target_sentiment = TextBlob(cleaned_input).sentiment.polarity
 
-            # Quantum-deterministic biasing helpers
             import math, hashlib
             def quantum_hash_float(seed_str, salt=0):
                 h = hashlib.sha256((seed_str + str(salt)).encode()).hexdigest()
@@ -1518,7 +1505,6 @@ class App(customtkinter.CTk):
             time_phase = datetime.utcnow().timestamp() / 120.0
             sentiment = target_sentiment
 
-            # Build the Dyson Sphere Gamma Predictor LLM prompt
             prompt_parts = [
                 f"[DYSON SPHERE GAMMA PREDICTOR: LOTTERY SIMULATION MODULE]",
                 "----------------------------------------------------------",
@@ -1593,7 +1579,6 @@ class App(customtkinter.CTk):
             ])
             base_prompt = "\n".join(prompt_parts)
 
-            # Candidate ensemble: 4 LLM completions, quantum-deterministic temp/top-p
             num_candidates = 4
             candidates = []
             for i in range(num_candidates):
@@ -1645,7 +1630,6 @@ class App(customtkinter.CTk):
             )
             final_output = f"{debug_meta}\n{best['response']}"
 
-            # Memory osmosis
             try:
                 self.quantum_memory_osmosis(cleaned_input, best['response'])
             except Exception as osm_e:
