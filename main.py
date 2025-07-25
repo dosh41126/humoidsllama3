@@ -531,63 +531,6 @@ def rgb_quantum_gate(
     )
 
 
-def generate_quantum_state(self, rgb=None):
-    if rgb is None or not isinstance(rgb, tuple) or len(rgb) != 3:
-        rgb = (128, 128, 128)
-
-    try:
-        cpu = psutil.cpu_percent(interval=0.3) / 100.0
-        cpu = max(cpu, 0.05)
-
-        r, g, b = [min(1.0, max(0.0, c / 255)) for c in rgb]
-
-        try:
-            lat = float(self.latitude_entry.get())
-            lon = float(self.longitude_entry.get())
-        except Exception:
-            lat, lon = 0.0, 0.0
-
-        try:
-            user_temp_f = float(self.temperature_entry.get() or 70.0)
-        except ValueError:
-            user_temp_f = 70.0
-
-        temp_f, weather_code, is_live = fetch_live_weather(lat, lon, user_temp_f)
-
-        if weather_code in {1, 2, 3}:
-            weather_scalar = 0.3
-        elif weather_code >= 61:
-            weather_scalar = 0.7
-        else:
-            weather_scalar = 0.0
-
-        tempo = 120  # static for now
-
-        z0, z1, z2 = rgb_quantum_gate(
-            r, g, b,
-            cpu_usage=cpu,
-            tempo=tempo,
-            lat=lat,
-            lon=lon,
-            temperature_f=temp_f,
-            weather_scalar=weather_scalar
-        )
-
-        source = "Live" if is_live else "Manual"
-
-        return (
-            f"[QuantumGate+Coherence] RGB={rgb} │ CPU={cpu*100:.1f}% │ "
-            f"Z=({z0:.3f}, {z1:.3f}, {z2:.3f}) │ "
-            f"GPS=({lat:.3f},{lon:.3f}) │ Temp={temp_f:.1f}°F ({source}) │ "
-            f"WeatherCode={weather_code}"
-        )
-
-    except Exception as e:
-        logger.error(f"Error in generate_quantum_state: {e}")
-        return "[QuantumGate] error"
-
-
-
 def get_current_multiversal_time():
     current_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     x, y, z, t = 34, 76, 12, 5633
