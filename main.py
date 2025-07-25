@@ -94,11 +94,8 @@ os.environ["SUNO_USE_SMALL_MODELS"] = "1"
 executor = ThreadPoolExecutor(max_workers=5)
 bundle_dir = path.abspath(path.dirname(__file__))
 path_to_config = path.join(bundle_dir, 'config.json')
-
 model_path = "/data/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
 mmproj_path = "/data/llama-3-vision-alpha-mmproj-f16.gguf"
-
-
 logo_path = path.join(bundle_dir, 'logo.png')
 
 def load_config(file_path=path_to_config):
@@ -164,7 +161,6 @@ DB_NAME = config['DB_NAME']
 API_KEY = config['API_KEY']
 WEAVIATE_ENDPOINT = config['WEAVIATE_ENDPOINT']
 WEAVIATE_QUERY_PATH = config['WEAVIATE_QUERY_PATH']
-
 
 class SecureEnclave:
 
@@ -270,8 +266,6 @@ class AdvancedHomomorphicVectorMemory:
     def enclave_similarity(self, enc_a: str, query_vec: np.ndarray, enclave: SecureEnclave) -> float:
         dec = enclave.track(self.decrypt_embedding(enc_a))
         return self.cosine(dec, query_vec)
-
-
 
 class SecureKeyManager:
 
@@ -850,7 +844,6 @@ def rgb_quantum_gate(
         qml.expval(qml.PauliZ(1)),
         qml.expval(qml.PauliZ(2)),
     )
-
 
 def get_current_multiversal_time():
     current_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
