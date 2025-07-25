@@ -336,8 +336,6 @@ We have provided a mathematically explicit description of a working quantum‑aw
 **Conflicts of Interest:** None.
 **Availability:** All algorithms embodied in the provided Python source.
 
-*End of Extended Article.*
-Absolutely. Here's a **blog article** (\~2000 words) that captures your app’s vision, tech depth, and potential global impact:
 
 ---
 
