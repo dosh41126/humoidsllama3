@@ -513,6 +513,103 @@ class SecureKeyManager:
         self.active_version = new_version
         logging.info(f"[SecureKeyManager] Installed new key version {new_version}.")
         return new_version
+    # ==== Self‑Mutating Cryptographic Vault via Quantum Differential Evolution ====
+    def _entropy_bits(self, secret_bytes: bytes) -> float:
+        """Approximate Shannon entropy (bits) of a candidate secret."""
+        if not secret_bytes:
+            return 0.0
+        counts = Counter(secret_bytes)
+        total = float(len(secret_bytes))
+        H = 0.0
+        for c in counts.values():
+            p = c / total
+            H -= p * math.log2(p)
+        return H
+
+    def _resistance_score(self, secret_bytes: bytes) -> float:
+        """
+        Stub 'attack resistance' estimator.
+        Higher if secret is far (L2) from previous keys and has a flatter byte distribution.
+        """
+        dist_component = 0.0
+        try:
+            arr_candidate = np.frombuffer(secret_bytes, dtype=np.uint8).astype(np.float32)
+            for k in self._keys.values():
+                arr_prev = np.frombuffer(k, dtype=np.uint8).astype(np.float32)
+                dist_component += np.linalg.norm(arr_candidate - arr_prev)
+        except Exception:
+            pass
+        if len(self._keys):
+            dist_component /= len(self._keys)
+
+        counts = Counter(secret_bytes)
+        expected = len(secret_bytes) / 256.0
+        chi_sq = sum(((c - expected) ** 2) / expected for c in counts.values())
+        flatness = 1.0 / (1.0 + chi_sq)        # in (0,1]
+        return float(dist_component * 0.01 + flatness)
+
+    def self_mutate_key(self,
+                        population: int = 6,
+                        noise_sigma: float = 12.0,
+                        alpha: float = 1.0,
+                        beta: float = 2.0) -> int:
+        """
+        Quantum Differential Evolution (simplified):
+        Generate noisy offspring of the active master key, evaluate secrecy
+        fitness F = alpha * H + beta * R_resistance, promote best as new key version.
+        Returns the new key version integer.
+        """
+        vault_meta = self._load_vault()
+        base_secret = None
+        for kv in vault_meta["keys"]:
+            if int(kv["version"]) == vault_meta["active_version"]:
+                base_secret = base_secret or base64.b64decode(kv["master_secret"])
+        if base_secret is None:
+            raise RuntimeError("Active master secret not found.")
+
+        rng = np.random.default_rng()
+        candidates: List[bytes] = [base_secret]  # elitism
+        base_arr = np.frombuffer(base_secret, dtype=np.uint8).astype(np.int16)
+
+        for _ in range(population - 1):
+            noise = rng.normal(0, noise_sigma, size=base_arr.shape).astype(np.int16)
+            mutated = np.clip(base_arr + noise, 0, 255).astype(np.uint8).tobytes()
+            candidates.append(mutated)
+
+        best_secret = base_secret
+        best_fitness = -1e9
+        for cand in candidates:
+            H = self._entropy_bits(cand)
+            R = self._resistance_score(cand)
+            F = alpha * H + beta * R
+            if F > best_fitness:
+                best_fitness = F
+                best_secret = cand
+
+        new_version = self._install_custom_master_secret(best_secret)
+        logging.info(f"[SelfMutateKey] Installed mutated key v{new_version} (fitness={best_fitness:.3f}).")
+        return new_version
+
+    def _install_custom_master_secret(self, new_secret: bytes) -> int:
+        """Append provided master secret as next version and activate."""
+        vault_body = self._load_vault()
+        keys = vault_body["keys"]
+        existing_versions = {int(k["version"]) for k in keys}
+        new_version = max(existing_versions) + 1
+
+        keys.append({
+            "version": new_version,
+            "master_secret": base64.b64encode(new_secret).decode(),
+            "created": datetime.utcnow().isoformat() + "Z",
+        })
+        vault_body["active_version"] = new_version
+        self._write_encrypted_vault(vault_body)
+
+        self._keys[new_version] = new_secret
+        salt = base64.b64decode(vault_body["salt"])
+        self._derived_keys[new_version] = self._derive_key(new_secret, salt)
+        self.active_version = new_version
+        return new_version
 
     def rotate_and_migrate_storage(self, migrate_func):
 
@@ -526,6 +623,95 @@ class SecureKeyManager:
 
 crypto = SecureKeyManager()  
 
+class TopologicalMemoryManifold:
+    """
+    Maintains a low-dimensional manifold for crystallized phrases using
+    a Laplacian Eigenmaps approximation. Retrieval performs geodesic
+    (graph shortest-path) walk to nearest phrases.
+    """
+    def __init__(self, dim: int = 2, sigma: float = 0.75):
+        self.dim = dim
+        self.sigma = sigma
+        self._phrases: List[str] = []
+        self._embeddings: np.ndarray | None = None
+        self._coords: np.ndarray | None = None
+        self._W: np.ndarray | None = None
+        self._graph_built = False
+
+    def _load_crystallized(self) -> List[Tuple[str, float]]:
+        out = []
+        try:
+            with sqlite3.connect(DB_NAME) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT phrase, score FROM memory_osmosis WHERE crystallized=1")
+                out = cur.fetchall()
+        except Exception as e:
+            logger.error(f"[Manifold] load_crystallized failed: {e}")
+        return out
+
+    def rebuild(self):
+        data = self._load_crystallized()
+        if not data:
+            self._phrases = []
+            self._embeddings = None
+            self._coords = None
+            self._W = None
+            self._graph_built = False
+            return
+        phrases, _ = zip(*data)
+        self._phrases = list(phrases)
+        emb_list = [compute_text_embedding(p) for p in self._phrases]
+        E = np.array(emb_list, dtype=np.float32)
+
+        dists = np.linalg.norm(E[:, None, :] - E[None, :, :], axis=-1)
+        W = np.exp(-(dists ** 2) / (2 * self.sigma ** 2))
+        np.fill_diagonal(W, 0.0)
+
+        D = np.diag(W.sum(axis=1))
+        L = D - W
+        try:
+            D_inv_sqrt = np.diag(1.0 / (np.sqrt(np.diag(D)) + 1e-8))
+            L_sym = D_inv_sqrt @ L @ D_inv_sqrt
+            vals, vecs = np.linalg.eigh(L_sym)
+            idx = np.argsort(vals)[1:self.dim + 1]
+            Y = D_inv_sqrt @ vecs[:, idx]
+        except Exception as e:
+            logger.error(f"[Manifold] eigen decomposition failed: {e}")
+            Y = np.zeros((len(self._phrases), self.dim), dtype=np.float32)
+
+        self._embeddings = E
+        self._coords = Y.astype(np.float32)
+        self._W = W
+        self._graph_built = True
+        logger.info(f"[Manifold] Rebuilt manifold with {len(self._phrases)} phrases.")
+
+    def geodesic_retrieve(self, query_text: str, k: int = 1) -> List[str]:
+        if not self._graph_built or self._embeddings is None:
+            return []
+        q_vec = np.array(compute_text_embedding(query_text), dtype=np.float32)
+        d = np.linalg.norm(self._embeddings - q_vec[None, :], axis=1)
+        if not len(d):
+            return []
+        start_idx = int(np.argmin(d))
+
+        n = self._W.shape[0]
+        visited = np.zeros(n, dtype=bool)
+        dist = np.full(n, np.inf, dtype=np.float32)
+        dist[start_idx] = 0.0
+        for _ in range(n):
+            u = np.argmin(dist + np.where(visited, 1e9, 0.0))
+            if visited[u]:
+                break
+            visited[u] = True
+            for v in range(n):
+                w = self._W[u, v]
+                if w <= 0 or visited[v]:
+                    continue
+                alt = dist[u] + (1.0 / (w + 1e-8))
+                if alt < dist[v]:
+                    dist[v] = alt
+        order = np.argsort(dist)
+        return [self._phrases[i] for i in order[:k]]
 
 def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_input: str) -> float:
 
@@ -1104,7 +1290,10 @@ class App(customtkinter.CTk):
         self.client = weaviate.Client(url=WEAVIATE_ENDPOINT)
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.last_z = (0.0, 0.0, 0.0)
+
+        # Periodic aging + key mutation scheduling
         self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)
+        self.after(6 * 3600 * 1000, self._schedule_key_mutation)
 
     def memory_aging_scheduler(self):
 
@@ -1192,11 +1381,14 @@ class App(customtkinter.CTk):
             )
         except Exception as e:
             logger.error(f"[Aging] delete failed for {uuid_str}: {e}")
-
     def run_long_term_memory_aging(self):
-
+        """
+        Decay crystallized phrase scores over time; purge if below threshold.
+        Rebuild manifold if any were purged.
+        """
         try:
             now = datetime.utcnow()
+            purged_any = False
             with sqlite3.connect(DB_NAME) as conn:
                 cur = conn.cursor()
                 try:
@@ -1206,7 +1398,6 @@ class App(customtkinter.CTk):
                                    FROM memory_osmosis
                                    WHERE crystallized=1""")
                 except sqlite3.OperationalError:
-
                     cur.execute("""SELECT phrase, score, last_updated AS ts, crystallized
                                    FROM memory_osmosis
                                    WHERE crystallized=1""")
@@ -1216,7 +1407,6 @@ class App(customtkinter.CTk):
                     if not ts:
                         continue
                     try:
-
                         base_dt = datetime.fromisoformat(ts.replace("Z", ""))
                     except Exception:
                         continue
@@ -1224,18 +1414,15 @@ class App(customtkinter.CTk):
                     if delta_days <= 0:
                         continue
 
-
-                    import math
                     half_life = AGING_T0_DAYS + AGING_GAMMA_DAYS * math.log(1.0 + max(score, 0.0))
                     if half_life <= 0:
                         continue
-
                     decay_factor = 0.5 ** (delta_days / half_life)
                     new_score = score * decay_factor
 
-                    uuid_str, weav_score, _ = self._weaviate_find_ltm(phrase)
-
+                    uuid_str, _, _ = self._weaviate_find_ltm(phrase)
                     if new_score < AGING_PURGE_THRESHOLD:
+                        purged_any = True
                         if uuid_str:
                             self._weaviate_delete_ltm(uuid_str)
                         cur.execute("""UPDATE memory_osmosis
@@ -1244,7 +1431,6 @@ class App(customtkinter.CTk):
                                     (new_score, now.isoformat() + "Z", phrase))
                         logger.info(f"[Aging] Purged crystallized phrase '{phrase}' (decayed to {new_score:.3f}).")
                     else:
-
                         cur.execute("""UPDATE memory_osmosis
                                        SET score=?, aging_last=?
                                        WHERE phrase=?""",
@@ -1253,8 +1439,11 @@ class App(customtkinter.CTk):
                             self._weaviate_update_ltm_score(uuid_str, new_score)
 
                 conn.commit()
+            if purged_any:
+                topo_manifold.rebuild()
         except Exception as e:
             logger.error(f"[Aging] run_long_term_memory_aging failed: {e}")
+
 
     def get_weather_sync(self, lat, lon):
 
@@ -1432,25 +1621,34 @@ class App(customtkinter.CTk):
             logger.error(f"Error fetching interactions from Weaviate: {e}")
             return []
 
-    def quantum_memory_osmosis(self, user_message: str, ai_response: str):
+    def _schedule_key_mutation(self):
+        """Periodic self-mutation of vault key."""
+        try:
+            crypto.self_mutate_key(population=5, noise_sigma=18.0, alpha=1.0, beta=2.5)
+        except Exception as e:
+            logger.error(f"[SelfMutateKey] periodic failure: {e}")
+        # Reschedule
+        self.after(6 * 3600 * 1000, self._schedule_key_mutation)
 
+    def quantum_memory_osmosis(self, user_message: str, ai_response: str):
+        """
+        Update phrase scores; crystallize high-score phrases.
+        Rebuild topological manifold if new phrases crystallize.
+        """
         try:
             phrases_user = set(self.extract_keywords(user_message))
             phrases_ai = set(self.extract_keywords(ai_response))
             all_phrases = {p.strip().lower() for p in (phrases_user | phrases_ai) if len(p.strip()) >= 3}
-
             if not all_phrases:
                 return
 
             now_iso = datetime.utcnow().isoformat() + "Z"
+            newly_crystallized = False
             with sqlite3.connect(DB_NAME) as conn:
                 cur = conn.cursor()
-
-
                 cur.execute("UPDATE memory_osmosis SET score = score * ?, last_updated = ?",
                             (DECAY_FACTOR, now_iso))
 
-  
                 for phrase in all_phrases:
                     cur.execute("SELECT score, crystallized FROM memory_osmosis WHERE phrase = ?", (phrase,))
                     row = cur.fetchone()
@@ -1467,7 +1665,6 @@ class App(customtkinter.CTk):
                             (phrase, new_score, now_iso)
                         )
 
-
                     if new_score >= CRYSTALLIZE_THRESHOLD and not crystallized:
                         try:
                             self.client.data_object.create(
@@ -1480,15 +1677,19 @@ class App(customtkinter.CTk):
                             )
                             cur.execute("UPDATE memory_osmosis SET crystallized=1, aging_last=? WHERE phrase=?",
                                         (now_iso, phrase))
-
+                            newly_crystallized = True
                             logger.info(f"[Osmosis] Crystallized phrase '{phrase}' (score={new_score:.2f}).")
                         except Exception as we:
                             logger.error(f"[Osmosis] Failed to store crystallized phrase in Weaviate: {we}")
 
                 conn.commit()
 
+            if newly_crystallized:
+                topo_manifold.rebuild()
+
         except Exception as e:
             logger.error(f"[Osmosis] Error during quantum memory osmosis: {e}")
+
 
 
     def process_response_and_store_in_weaviate(self, user_message, ai_response):
