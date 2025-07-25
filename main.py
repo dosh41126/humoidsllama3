@@ -51,7 +51,10 @@ VAULT_VERSION             = 1
 DATA_KEY_VERSION          = 1         
 VAULT_NONCE_SIZE          = 12    
 DATA_NONCE_SIZE           = 12
-
+AGING_T0_DAYS = 7.0          # base half‑life (t0)
+AGING_GAMMA_DAYS = 5.0       # gamma coefficient (γ)
+AGING_PURGE_THRESHOLD = 0.5  # delete crystallized phrase if score drops below
+AGING_INTERVAL_SECONDS = 3600  # run aging job every hour
 def _aad_str(*parts: str) -> bytes:
     return ("|".join(parts)).encode("utf-8")
 
@@ -774,6 +777,18 @@ def init_db():
         if 'LongTermMemory' not in existing_names:
             client.schema.create_class(long_term_memory_class)
 
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cur = conn.cursor()
+            # Add aging_last column if not present (optional)
+            cur.execute("PRAGMA table_info(memory_osmosis)")
+            cols = {row[1] for row in cur.fetchall()}
+            if "aging_last" not in cols:
+                cur.execute("ALTER TABLE memory_osmosis ADD COLUMN aging_last TEXT")
+                conn.commit()
+    except Exception as e:
+        logger.warning(f"[Aging] Could not add aging_last column (continuing with last_updated): {e}")
+
     except Exception as e:
         logger.error(f"Error during database initialization: {e}")
         raise
@@ -1090,7 +1105,13 @@ class App(customtkinter.CTk):
         self.client = weaviate.Client(url=WEAVIATE_ENDPOINT)
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.last_z = (0.0, 0.0, 0.0)
-
+                # Start aging scheduler
+        self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)
+    def memory_aging_scheduler(self):
+        """Tkinter periodic callback to run aging job."""
+        self.run_long_term_memory_aging()
+        # reschedule
+        self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)
     def __exit__(self, exc_type, exc_value, traceback):
         self.executor.shutdown(wait=True)
 
@@ -1120,6 +1141,130 @@ class App(customtkinter.CTk):
             logger.error(f"An error occurred while retrieving interactions: {e}")
             result_queue.put([])
 
+    # ---------- Long-Term Memory Aging Helpers ----------
+
+    def _weaviate_find_ltm(self, phrase: str):
+        """Return (uuid, score, crystallized_time) for a LongTermMemory phrase or (None, None, None)."""
+        safe_phrase = sanitize_for_graphql_string(phrase, max_len=256)
+        gql = f"""
+        {{
+          Get {{
+            LongTermMemory(
+              where: {{ path:["phrase"], operator:Equal, valueString:"{safe_phrase}" }}
+              limit: 1
+            ) {{
+              phrase
+              score
+              crystallized_time
+              _additional {{ id }}
+            }}
+          }}
+        }}
+        """
+        try:
+            resp = self.client.query.raw(gql)
+            items = resp.get("data", {}).get("Get", {}).get("LongTermMemory", [])
+            if not items:
+                return None, None, None
+            obj = items[0]
+            return (
+                obj["_additional"]["id"],
+                float(obj.get("score", 0.0)),
+                obj.get("crystallized_time", "")
+            )
+        except Exception as e:
+            logger.error(f"[Aging] _weaviate_find_ltm failed: {e}")
+            return None, None, None
+
+    def _weaviate_update_ltm_score(self, uuid_str: str, new_score: float):
+        try:
+            self.client.data_object.update(
+                class_name="LongTermMemory",
+                uuid=uuid_str,
+                data_object={"score": new_score}
+            )
+        except Exception as e:
+            logger.error(f"[Aging] update score failed for {uuid_str}: {e}")
+
+    def _weaviate_delete_ltm(self, uuid_str: str):
+        try:
+            self.client.data_object.delete(
+                class_name="LongTermMemory",
+                uuid=uuid_str
+            )
+        except Exception as e:
+            logger.error(f"[Aging] delete failed for {uuid_str}: {e}")
+
+    def run_long_term_memory_aging(self):
+        """
+        Periodically decay crystallized phrase scores using half-life formula:
+            t_half(p) = t0 + gamma * log(1 + s_p)
+        Score decays exponentially since last aging timestamp.
+        If score < AGING_PURGE_THRESHOLD -> remove from Weaviate & mark uncrystallized locally.
+        """
+        try:
+            now = datetime.utcnow()
+            with sqlite3.connect(DB_NAME) as conn:
+                cur = conn.cursor()
+                # Prefer aging_last column, fallback to last_updated
+                try:
+                    cur.execute("""SELECT phrase, score,
+                                          COALESCE(aging_last, last_updated) AS ts,
+                                          crystallized
+                                   FROM memory_osmosis
+                                   WHERE crystallized=1""")
+                except sqlite3.OperationalError:
+                    # aging_last may not exist
+                    cur.execute("""SELECT phrase, score, last_updated AS ts, crystallized
+                                   FROM memory_osmosis
+                                   WHERE crystallized=1""")
+
+                rows = cur.fetchall()
+                for phrase, score, ts, crystallized in rows:
+                    if not ts:
+                        continue
+                    try:
+                        # parse timestamp (strip trailing Z if present)
+                        base_dt = datetime.fromisoformat(ts.replace("Z", ""))
+                    except Exception:
+                        continue
+                    delta_days = max(0.0, (now - base_dt).total_seconds() / 86400.0)
+                    if delta_days <= 0:
+                        continue
+
+                    # half-life based on CURRENT score
+                    import math
+                    half_life = AGING_T0_DAYS + AGING_GAMMA_DAYS * math.log(1.0 + max(score, 0.0))
+                    if half_life <= 0:
+                        continue
+
+                    # exponential decay for this interval
+                    decay_factor = 0.5 ** (delta_days / half_life)
+                    new_score = score * decay_factor
+
+                    uuid_str, weav_score, _ = self._weaviate_find_ltm(phrase)
+
+                    if new_score < AGING_PURGE_THRESHOLD:
+                        # Purge: remove from Weaviate + mark uncrystallized
+                        if uuid_str:
+                            self._weaviate_delete_ltm(uuid_str)
+                        cur.execute("""UPDATE memory_osmosis
+                                       SET crystallized=0, score=?, aging_last=?
+                                       WHERE phrase=?""",
+                                    (new_score, now.isoformat() + "Z", phrase))
+                        logger.info(f"[Aging] Purged crystallized phrase '{phrase}' (decayed to {new_score:.3f}).")
+                    else:
+                        # Update local + remote
+                        cur.execute("""UPDATE memory_osmosis
+                                       SET score=?, aging_last=?
+                                       WHERE phrase=?""",
+                                    (new_score, now.isoformat() + "Z", phrase))
+                        if uuid_str:
+                            self._weaviate_update_ltm_score(uuid_str, new_score)
+
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[Aging] run_long_term_memory_aging failed: {e}")
 
     def get_weather_sync(self, lat, lon):
 
@@ -1348,7 +1493,9 @@ class App(customtkinter.CTk):
                                 },
                                 class_name="LongTermMemory",
                             )
-                            cur.execute("UPDATE memory_osmosis SET crystallized=1 WHERE phrase=?", (phrase,))
+                            cur.execute("UPDATE memory_osmosis SET crystallized=1, aging_last=? WHERE phrase=?",
+                                        (now_iso, phrase))
+
                             logger.info(f"[Osmosis] Crystallized phrase '{phrase}' (score={new_score:.2f}).")
                         except Exception as we:
                             logger.error(f"[Osmosis] Failed to store crystallized phrase in Weaviate: {we}")
