@@ -38,7 +38,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from argon2.low_level import hash_secret_raw, Type
 import bleach
 import httpx
-
+import math
+from typing import List, Tuple
 
 ARGON2_TIME_COST_DEFAULT = 3          
 ARGON2_MEMORY_COST_KIB    = 262144   
@@ -270,7 +271,7 @@ class AdvancedHomomorphicVectorMemory:
         dec = enclave.track(self.decrypt_embedding(enc_a))
         return self.cosine(dec, query_vec)
 
-fhe_v2 = AdvancedHomomorphicVectorMemory()
+
 
 class SecureKeyManager:
 
@@ -611,7 +612,7 @@ class SecureKeyManager:
         logging.info(f"[SecureKeyManager] Migration to key v{new_ver} complete.")
 
 crypto = SecureKeyManager()  
-
+fhe_v2 = AdvancedHomomorphicVectorMemory()
 class TopologicalMemoryManifold:
 
     def __init__(self, dim: int = 2, sigma: float = 0.75):
