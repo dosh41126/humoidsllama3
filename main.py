@@ -160,6 +160,129 @@ WEAVIATE_ENDPOINT = config['WEAVIATE_ENDPOINT']
 WEAVIATE_QUERY_PATH = config['WEAVIATE_QUERY_PATH']
 
 
+# === Advanced Homomorphic Vector Memory v2 ===
+class SecureEnclave:
+    """
+    Context manager to 'contain' decrypted embeddings.
+    In a real system this could map to an OS enclave or SGX call.
+    """
+    def __enter__(self):
+        self._buffers = []
+        return self
+
+    def track(self, buf):
+        self._buffers.append(buf)
+        return buf
+
+    def __exit__(self, exc_type, exc, tb):
+        # Zero sensitive arrays
+        for b in self._buffers:
+            try:
+                if isinstance(b, np.ndarray):
+                    b.fill(0.0)
+            except Exception:
+                pass
+        self._buffers.clear()
+
+
+class AdvancedHomomorphicVectorMemory:
+    """
+    Simulated FHE-compatible layer with:
+    - Secret rotation
+    - Quantization
+    - LSH bucket (SimHash)
+    """
+    AAD_CONTEXT = _aad_str("fhe", "embeddingv2")
+    DIM = 64
+    QUANT_SCALE = 127.0  # for int8 simulation
+
+    def __init__(self):
+        # Derive deterministic rotation matrix from vault key material
+        master_key = crypto._derived_keys[crypto.active_version]
+        seed = int.from_bytes(hashlib.sha256(master_key).digest()[:8], "big")
+        rng = np.random.default_rng(seed)
+        # Generate random matrix and QR-decompose to orthonormal
+        A = rng.normal(size=(self.DIM, self.DIM))
+        Q, _ = np.linalg.qr(A)
+        self.rotation = Q  # orthonormal
+
+        # Pre-generate random hyperplanes for SimHash
+        self.lsh_planes = rng.normal(size=(16, self.DIM))  # 16-bit signature
+
+    def _rotate(self, vec: np.ndarray) -> np.ndarray:
+        return self.rotation @ vec
+
+    def _quantize(self, vec: np.ndarray) -> list[int]:
+        clipped = np.clip(vec, -1.0, 1.0)
+        return (clipped * self.QUANT_SCALE).astype(np.int8).tolist()
+
+    def _dequantize(self, q: list[int]) -> np.ndarray:
+        arr = np.array(q, dtype=np.float32) / self.QUANT_SCALE
+        return arr
+
+    def _simhash_bucket(self, rotated_vec: np.ndarray) -> str:
+        # Compute sign bits of projections
+        dots = self.lsh_planes @ rotated_vec
+        bits = ["1" if d >= 0 else "0" for d in dots]
+        return "".join(bits)  # 16-bit string
+
+    def encrypt_embedding(self, vec: list[float]) -> tuple[str, str]:
+        try:
+            arr = np.array(vec, dtype=np.float32)
+            if arr.shape[0] != self.DIM:
+                # Pad or trim
+                if arr.shape[0] < self.DIM:
+                    arr = np.concatenate([arr, np.zeros(self.DIM - arr.shape[0])])
+                else:
+                    arr = arr[:self.DIM]
+
+            rotated = self._rotate(arr)
+            bucket = self._simhash_bucket(rotated)
+            quant = self._quantize(rotated)
+
+            payload = json.dumps({
+                "v": 2,
+                "dim": self.DIM,
+                "rot": True,
+                "data": quant,
+            })
+            token = crypto.encrypt(payload, aad=self.AAD_CONTEXT)
+            return token, bucket
+        except Exception as e:
+            logger.error(f"[FHEv2] encrypt_embedding failed: {e}")
+            return "", "0"*16
+
+    def decrypt_embedding(self, token: str) -> np.ndarray:
+        try:
+            raw = crypto.decrypt(token)
+            obj = json.loads(raw)
+            if obj.get("v") != 2:
+                logger.warning("[FHEv2] Unsupported embedding version.")
+                return np.zeros(self.DIM, dtype=np.float32)
+            quant = obj.get("data", [])
+            rotated = self._dequantize(quant)
+            # Inverse rotation = transpose (orthonormal)
+            original = self.rotation.T @ rotated
+            return original
+        except Exception as e:
+            logger.warning(f"[FHEv2] decrypt_embedding failed: {e}")
+            return np.zeros(self.DIM, dtype=np.float32)
+
+    @staticmethod
+    def cosine(a: np.ndarray, b: np.ndarray) -> float:
+        denom = (np.linalg.norm(a) * np.linalg.norm(b))
+        if denom == 0:
+            return 0.0
+        return float(np.dot(a, b) / denom)
+
+    def enclave_similarity(self, enc_a: str, query_vec: np.ndarray, enclave: SecureEnclave) -> float:
+        dec = enclave.track(self.decrypt_embedding(enc_a))
+        return self.cosine(dec, query_vec)
+
+
+fhe_v2 = AdvancedHomomorphicVectorMemory()
+
+
 class SecureKeyManager:
 
     def __init__(
@@ -451,8 +574,20 @@ def build_record_aad(user_id: str, *, source: str, table: str = "", cls: str = "
     return _aad_str(*context_parts)
 
 def compute_text_embedding(text: str) -> list[float]:
+    if not text:
+        return [0.0] * fhe_v2.DIM
+    tokens = re.findall(r'\w+', text.lower())
+    counts = Counter(tokens)
+    vocab = sorted(counts.keys())[:fhe_v2.DIM]
+    vec = [float(counts[w]) for w in vocab]
+    if len(vec) < fhe_v2.DIM:
+        vec.extend([0.0] * (fhe_v2.DIM - len(vec)))
+    arr = np.array(vec, dtype=np.float32)
+    n = np.linalg.norm(arr)
+    if n > 0:
+        arr /= n
+    return arr.tolist()
 
-    return [0.0] * 384
 
 def generate_uuid_for_weaviate(identifier, namespace=''):
     if not identifier:
@@ -642,11 +777,8 @@ def save_user_message(user_id, user_input):
     if not user_input:
         logger.warning("User input is empty.")
         return
-
     try:
-
         user_input = sanitize_text(user_input, max_len=4000)
-
         response_time = get_current_multiversal_time()
 
         aad_sql  = build_record_aad(user_id=user_id, source="sqlite", table="local_responses")
@@ -654,7 +786,6 @@ def save_user_message(user_id, user_input):
 
         encrypted_input_sql  = crypto.encrypt(user_input, aad=aad_sql)
         encrypted_input_weav = crypto.encrypt(user_input, aad=aad_weav)
-
 
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -664,45 +795,44 @@ def save_user_message(user_id, user_input):
             )
             conn.commit()
 
-        embedding = compute_text_embedding(user_input)
+        plain_embedding = compute_text_embedding(user_input)
+        enc_embedding, bucket = fhe_v2.encrypt_embedding(plain_embedding)
+        dummy_vector = [0.0] * fhe_v2.DIM
 
-        encrypted_weaviate_object = {
+        obj = {
             "user_id": user_id,
             "user_message": encrypted_input_weav,
             "response_time": response_time,
+            "encrypted_embedding": enc_embedding,
+            "embedding_bucket": bucket
         }
         generated_uuid = generate_uuid5(user_id, user_input)
-
         response = requests.post(
             'http://127.0.0.1:8079/v1/objects',
             json={
                 "class": "InteractionHistory",
                 "id": generated_uuid,
-                "properties": encrypted_weaviate_object,
-                "vector": embedding,
-            }
+                "properties": obj,
+                "vector": dummy_vector
+            },
+            timeout=10
         )
         if response.status_code not in (200, 201):
             logger.error(f"Weaviate POST failed: {response.status_code} {response.text}")
-
     except Exception as e:
         logger.exception(f"Exception in save_user_message: {e}")
 
 def save_bot_response(bot_id: str, bot_response: str):
     logger.info(f"[save_bot_response] bot_id={bot_id}")
-
     if not bot_response:
         logger.warning("Bot response is empty.")
         return
-
     try:
-
         bot_response = sanitize_text(bot_response, max_len=4000)
-
         response_time = get_current_multiversal_time()
 
-        aad_sql  = build_record_aad(user_id=bot_id, source="sqlite", table="local_responses")
-        enc_sql  = crypto.encrypt(bot_response, aad=aad_sql)
+        aad_sql = build_record_aad(user_id=bot_id, source="sqlite", table="local_responses")
+        enc_sql = crypto.encrypt(bot_response, aad=aad_sql)
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -714,33 +844,33 @@ def save_bot_response(bot_id: str, bot_response: str):
         aad_weav = build_record_aad(user_id=bot_id, source="weaviate", cls="InteractionHistory")
         enc_weav = crypto.encrypt(bot_response, aad=aad_weav)
 
+        plain_embedding = compute_text_embedding(bot_response)
+        enc_embedding, bucket = fhe_v2.encrypt_embedding(plain_embedding)
+        dummy_vector = [0.0] * fhe_v2.DIM
+
         props = {
             "user_id": bot_id,
             "ai_response": enc_weav,
             "response_time": response_time,
+            "encrypted_embedding": enc_embedding,
+            "embedding_bucket": bucket
         }
-
-        embedding = compute_text_embedding(bot_response)
-        if isinstance(embedding, np.ndarray):
-            embedding = embedding.tolist()
-
         generated_uuid = generate_uuid5(bot_id, bot_response)
-
         resp = requests.post(
             "http://127.0.0.1:8079/v1/objects",
             json={
                 "class": "InteractionHistory",
                 "id": generated_uuid,
                 "properties": props,
-                "vector": embedding,
+                "vector": dummy_vector
             },
-            timeout=10,
+            timeout=10
         )
         if resp.status_code not in (200, 201):
             logger.error(f"Weaviate POST failed: {resp.status_code} {resp.text}")
-
     except Exception as e:
         logger.exception(f"Exception in save_bot_response: {e}")
+
 
 
 llm = Llama(
@@ -785,52 +915,60 @@ def truncate_text(text, max_words=100):
    return ' '.join(text.split()[:max_words])
 
 def fetch_relevant_info(chunk, client, user_input):
-    if not user_input:
-        logger.error("User input is None or empty.")
-        return ""
-
-    chunk_clean = sanitize_text(chunk, max_len=1024)
-    user_input_clean = sanitize_text(user_input, max_len=1024)
-
-    summarized_chunk = summarizer.summarize(chunk_clean)
-    query_chunk = summarized_chunk if summarized_chunk else chunk_clean
-
-    if not query_chunk:
-        logger.error("Query chunk is empty.")
-        return ""
-
-    query = {
-        "query": {
-            "nearText": {
-                "concepts": [user_input_clean],
-                "certainty": 0.7
-            }
-        }
-    }
-
     try:
-        response = client.query.raw(json.dumps(query))
-        logger.debug(f"Query sent: {json.dumps(query)}")
-        logger.debug(f"Response received: {response}")
-
-        if (
-            response and
-            'data' in response and
-            'Get' in response['data'] and
-            'InteractionHistory' in response['data']['Get'] and
-            response['data']['Get']['InteractionHistory']
-        ):
-            interaction = response['data']['Get']['InteractionHistory'][0]
-            user_msg = interaction.get('user_message', '')
-            ai_resp  = interaction.get('ai_response', '')
-
-            return f"{user_msg} {ai_resp}"
-        else:
-            logger.warning("No relevant data found in Weaviate response.")
+        if not user_input:
             return ""
 
+        query_vec = np.array(compute_text_embedding(user_input), dtype=np.float32)
+        # Derive same bucket for query
+        rotated = fhe_v2._rotate(query_vec)
+        bucket = fhe_v2._simhash_bucket(rotated)
+
+        gql = f"""
+        {{
+            Get {{
+                InteractionHistory(
+                    where: {{
+                        path: ["embedding_bucket"],
+                        operator: Equal,
+                        valueString: "{bucket}"
+                    }}
+                    limit: 40
+                    sort: {{path:"response_time", order: desc}}
+                ) {{
+                    user_message
+                    ai_response
+                    encrypted_embedding
+                }}
+            }}
+        }}
+        """
+        response = client.query.raw(gql)
+        results = (
+            response.get('data', {})
+                    .get('Get', {})
+                    .get('InteractionHistory', [])
+        )
+        best = None
+        best_score = -1.0
+        with SecureEnclave() as enclave:
+            for obj in results:
+                enc_emb = obj.get("encrypted_embedding", "")
+                if not enc_emb:
+                    continue
+                score = fhe_v2.enclave_similarity(enc_emb, query_vec, enclave)
+                if score > best_score:
+                    best_score = score
+                    best = obj
+
+        if not best or best_score <= 0:
+            return ""
+
+        user_msg_raw = try_decrypt(best.get("user_message", ""))
+        ai_resp_raw  = try_decrypt(best.get("ai_response", ""))
+        return f"{user_msg_raw} {ai_resp_raw}"
     except Exception as e:
-        logger.error(f"Weaviate query failed: {e}")
+        logger.error(f"[FHEv2 retrieval] failed: {e}")
         return ""
 
 def llama_generate(prompt, weaviate_client=None, user_input=None, temperature=1.0, top_p=0.9):
@@ -1063,49 +1201,59 @@ class App(customtkinter.CTk):
 
 
     def fetch_relevant_info_internal(self, chunk):
-        if self.client:
-            safe_chunk = sanitize_for_graphql_string(chunk, max_len=256)
+        try:
+            query_vec = np.array(compute_text_embedding(chunk), dtype=np.float32)
+            rotated = fhe_v2._rotate(query_vec)
+            bucket = fhe_v2._simhash_bucket(rotated)
 
-            query = f"""
+            gql = f"""
             {{
                 Get {{
                     InteractionHistory(
-                        nearText: {{
-                            concepts: ["{safe_chunk}"],
-                            certainty: 0.7
+                        where: {{
+                            path: ["embedding_bucket"],
+                            operator: Equal,
+                            valueString: "{bucket}"
                         }}
-                        limit: 1
+                        limit: 40
+                        sort: {{path:"response_time", order: desc}}
                     ) {{
                         user_message
                         ai_response
-                        response_time
+                        encrypted_embedding
                     }}
                 }}
             }}
             """
-            try:
-                response = self.client.query.raw(query)
-                results = (
-                    response.get('data', {})
-                            .get('Get', {})
-                            .get('InteractionHistory', [])
-                )
-                if not results:
-                    return "", ""
-                interaction = results[0]
+            response = self.client.query.raw(gql)
+            results = (
+                response.get('data', {})
+                        .get('Get', {})
+                        .get('InteractionHistory', [])
+            )
 
-                user_msg_raw = self._decrypt_field(interaction.get('user_message', ''))
-                ai_resp_raw  = self._decrypt_field(interaction.get('ai_response', ''))
+            best = None
+            best_score = -1.0
+            with SecureEnclave() as enclave:
+                for obj in results:
+                    enc_emb = obj.get("encrypted_embedding", "")
+                    if not enc_emb:
+                        continue
+                    score = fhe_v2.enclave_similarity(enc_emb, query_vec, enclave)
+                    if score > best_score:
+                        best_score = score
+                        best = obj
 
-                user_msg = sanitize_text(user_msg_raw, max_len=4000)
-                ai_resp  = sanitize_text(ai_resp_raw, max_len=4000)
-
-                return user_msg, ai_resp
-
-            except Exception as e:
-                logger.error(f"Weaviate query failed: {e}")
+            if not best or best_score <= 0:
                 return "", ""
-        return "", ""
+
+            user_msg = sanitize_text(try_decrypt(best.get("user_message", "")), max_len=4000)
+            ai_resp  = sanitize_text(try_decrypt(best.get("ai_response", "")), max_len=4000)
+            return user_msg, ai_resp
+        except Exception as e:
+            logger.error(f"[FHEv2 internal retrieval] {e}")
+            return "", ""
+
 
     def fetch_interactions(self):
         try:
