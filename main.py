@@ -1458,6 +1458,7 @@ class App(customtkinter.CTk):
                 logger.error(f"Error in mapping keyword '{keyword}': {e}")
 
         return mapped_classes
+
     def generate_response(self, user_input):
         try:
             if not user_input:
@@ -1468,9 +1469,17 @@ class App(customtkinter.CTk):
             bot_id = self.bot_id
             save_user_message(user_id, user_input)
 
+            # Pull context from GUI fields
+            lottery_type = (self.lottery_type_entry.get() or "Powerball").strip()
+            lat = (self.latitude_entry.get() or "0").strip()
+            lon = (self.longitude_entry.get() or "0").strip()
+            temp = (self.temperature_entry.get() or "72").strip()
+            weather = (self.weather_entry.get() or "Clear").strip()
+            song = (self.last_song_entry.get() or "None").strip()
+
+            # Clean input, get context if needed
             include_past_context = "[pastcontext]" in user_input.lower()
             cleaned_input = sanitize_text(user_input.replace("[pastcontext]", ""), max_len=2000)
-
             past_context = ""
             if include_past_context:
                 result_queue = queue.Queue()
@@ -1482,38 +1491,126 @@ class App(customtkinter.CTk):
                         for i in interactions
                     )[-1500:]
 
-
+            # Quantum and RGB analysis
             rgb = extract_rgb_from_text(cleaned_input)
             r, g, b = [c / 255 for c in rgb]
             cpu = psutil.cpu_percent(interval=0.3) / 100.0
             z0, z1, z2 = rgb_quantum_gate(r, g, b, cpu)
-
+            self.last_z = (z0, z1, z2)
+            quantum_state = self.generate_quantum_state(rgb=rgb)
             bias_factor = (z0 + z1 + z2) / 3.0
             base_temperature = max(0.2, min(1.5, 1.0 + bias_factor))
             base_top_p = max(0.2, min(1.0, 0.9 - 0.5 * abs(bias_factor)))
-
-            quantum_state = self.generate_quantum_state(rgb=rgb)
-
-
             target_sentiment = TextBlob(cleaned_input).sentiment.polarity
-            num_candidates = 4
-            candidates = []
 
+            # Quantum-deterministic biasing helpers
+            import math, hashlib
+            def quantum_hash_float(seed_str, salt=0):
+                h = hashlib.sha256((seed_str + str(salt)).encode()).hexdigest()
+                return int(h[:8], 16) / 0xFFFFFFFF
 
+            try:
+                lat_f = float(lat)
+                lon_f = float(lon)
+            except Exception:
+                lat_f = 0.0
+                lon_f = 0.0
+            time_phase = datetime.utcnow().timestamp() / 120.0
+            sentiment = target_sentiment
+
+            # Build the Dyson Sphere Gamma Predictor LLM prompt
             prompt_parts = [
+                f"[DYSON SPHERE GAMMA PREDICTOR: LOTTERY SIMULATION MODULE]",
+                "----------------------------------------------------------",
+                f">> System Status: Dyson Sphere Core ∙ Gamma Node 11B ∙ 30,000-Qubit Array ONLINE",
+                f">> Uplink: Multiversal Quantum Mesh ({lat}, {lon}), Surface Temp: {temp}°F, Weather: {weather}",
+                f">> Last Human Input Context: “{cleaned_input}”",
+                f">> Most recent auditory signature: {song}",
+                f">> Lottery Mode: {lottery_type}",
+                "",
+                "[coherencegain]",
+                "Initializing Dyson Sphere’s 30,000-qubit coherence alignment with planetary input, biometric signals, and Dyson temporal mesh.",
+                "Coherence threshold exceeded. Quantum synchronization with the multiversal luck field achieved.",
+                "[/coherencegain]",
+                "",
                 f"[QuantumStateInfo]\n{quantum_state}",
                 f"[QuantumZAlignment]\nZ0={z0:.3f}, Z1={z1:.3f}, Z2={z2:.3f}",
             ]
             if past_context:
                 prompt_parts.append(f"[ContextHistory]\n{past_context}")
-            prompt_parts.append(f"[User]\n{cleaned_input}")
-            prompt_parts.append("[Assistant]")
-            base_prompt = "\n\n".join(prompt_parts)
 
+            prompt_parts.extend([
+                ">>> Initiating Quantum Future-Projection Sequence (x3 predictive cycles)",
+                "----------------------------------------------------------",
+                "",
+                "[action]",
+                "[CYCLE 1: WAVEFORM COLLAPSE]",
+                "Initializing entanglement lattice...",
+                "Aligning user context, weather patterns, planetary phase, and biometric input.",
+                "Stochastic waveform collapse complete. Baseline probability vectors computed.",
+                "[/action]",
+                "",
+                "[coherencegain]",
+                "Inter-cycle quantum noise reduced. Enhanced signal fidelity. Dyson luck resonance climbing.",
+                "[/coherencegain]",
+                "",
+                "[action]",
+                "[CYCLE 2: GAMMA CHANNEL SWEEP]",
+                "Activating Dyson Sphere quantum prediction engine.",
+                "Gamma subspace resonance achieved.",
+                f"Simulating {lottery_type} results across 99,999,999 probable timelines.",
+                "Temporal feedback loop stabilized. Filtering for most constructively resonant outcomes.",
+                "[/action]",
+                "",
+                "[coherencegain]",
+                "Multiversal timeline braid achieves maximum phase alignment.",
+                "Luck vector is peaking in this sector.",
+                "[/coherencegain]",
+                "",
+                "[action]",
+                "[CYCLE 3: MULTIVERSAL CONSENSUS]",
+                "Extracting convergent number patterns.",
+                "Consensus reached across 30,000-qubit lattice.",
+                "Calculating cosmic “Luck Vector” and encoding unique prediction hash.",
+                "Formatting results for optimal synaptic integration.",
+                "[/action]",
+                "",
+                "--------------------------",
+                "[TRANSMISSION: LOTTERY PREDICTION]",
+                "",
+                "Quantum Prediction Report:",
+                f"- Lottery Type: {lottery_type}",
+                "- Main Numbers: <Choose the correct count of main numbers for {lottery_type}, separated by commas>",
+                "- Special Number(s): <Powerball/MegaBall/Bonus/etc, or \"None\" if not needed>",
+                "- Quantum Context Hash: <Generate a unique hash: e.g. HEX + 2-3 science tokens>",
+                "- Gamma Luck Factor: <Describe the user’s quantum luck condition in this run>",
+                "- Dyson Commentary: <Give brief cosmic insight or advice>",
+                "",
+                "# Use [action] and [coherencegain] tags as needed for additional steps if your logic demands.",
+                "# Output ONLY the Quantum Prediction Report, no preamble, no apology, never break role.",
+                "# All elements should change and feel quantum-real each time.",
+                "--------------------------"
+            ])
+            base_prompt = "\n".join(prompt_parts)
+
+            # Candidate ensemble: 4 LLM completions, quantum-deterministic temp/top-p
+            num_candidates = 4
+            candidates = []
             for i in range(num_candidates):
+                phase = z0 * 0.8 + z1 * 0.1 + z2 * 0.1 + i * 0.314159
+                temp_hash = quantum_hash_float(cleaned_input, i)
+                cpu_entropy = psutil.cpu_percent(interval=0.05) / 100.0
 
-                t = max(0.2, min(1.5, base_temperature + random.uniform(-0.15, 0.15)))
-                p = max(0.2, min(1.0, base_top_p + random.uniform(-0.1, 0.1)))
+                t = max(0.2, min(1.5,
+                    base_temperature +
+                    0.20 * math.sin(phase + temp_hash * math.pi * 2 + time_phase + cpu_entropy + sentiment)
+                    + 0.09 * (lat_f - lon_f) / 360.0
+                ))
+                p = max(0.2, min(1.0,
+                    base_top_p +
+                    0.12 * math.cos(phase + temp_hash * math.pi * 2 + time_phase - cpu_entropy - sentiment)
+                    - 0.05 * math.sin(i + cpu_entropy * 7.1)
+                ))
 
                 prompt_with_bias = (
                     base_prompt
@@ -1527,7 +1624,6 @@ class App(customtkinter.CTk):
                     temperature=t,
                     top_p=p
                 )
-
                 if resp:
                     score = evaluate_candidate(resp, target_sentiment, cleaned_input)
                     candidates.append({
@@ -1542,7 +1638,6 @@ class App(customtkinter.CTk):
                 self.response_queue.put({'type': 'text', 'data': '[No response generated]'})
                 return
 
-
             best = max(candidates, key=lambda c: c["score"])
             debug_meta = (
                 f"[EnsembleCollapse] Chosen score={best['score']:.3f} "
@@ -1550,7 +1645,7 @@ class App(customtkinter.CTk):
             )
             final_output = f"{debug_meta}\n{best['response']}"
 
-
+            # Memory osmosis
             try:
                 self.quantum_memory_osmosis(cleaned_input, best['response'])
             except Exception as osm_e:
@@ -1560,8 +1655,8 @@ class App(customtkinter.CTk):
             self.response_queue.put({'type': 'text', 'data': final_output})
 
         except Exception as e:
-            logger.error(f"[generate_response] Error: {e}")
-            self.response_queue.put({'type': 'text', 'data': f'[Error] {e}'})
+            logger.error(f"[generate_response] Dyson Sphere error: {e}")
+            self.response_queue.put({'type': 'text', 'data': f'[Quantum Error] {e}'})
 
 
     def process_generated_response(self, response_text):
