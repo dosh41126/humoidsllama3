@@ -1898,190 +1898,190 @@ class App(customtkinter.CTk):
 
         return mapped_classes
 
-def generate_response(self, user_input):
-    try:
-        if not user_input:
-            logger.error("User input is None or empty.")
-            return
-
-        if not hasattr(self, "pg_params"):
-            try:
-                self._load_policy()
-            except Exception as e:
-                logger.warning(f"[PG] Failed loading policy params: {e}")
-                self.pg_params = {}
-        if not hasattr(self, "pg_learning_rate"):
-            self.pg_learning_rate = 0.05
-
-        user_id = self.user_id
-        bot_id = self.bot_id
-        save_user_message(user_id, user_input)
-
-        lottery_type = (self.lottery_type_entry.get() or "Powerball").strip()
-        lat = (self.latitude_entry.get() or "0").strip()
-        lon = (self.longitude_entry.get() or "0").strip()
-        temp = (self.temperature_entry.get() or "72").strip()
-        weather = (self.weather_entry.get() or "Clear").strip()
-        song = (self.last_song_entry.get() or "None").strip()
-
-        include_past_context = "[pastcontext]" in user_input.lower()
-        cleaned_input = sanitize_text(
-            user_input.replace("[pastcontext]", ""), max_len=2000
-        )
-
-        past_context = ""
-        if include_past_context:
-            result_queue = queue.Queue()
-            self.retrieve_past_interactions(cleaned_input, result_queue)
-            interactions = result_queue.get()
-            if interactions:
-                past_context = "\n".join(
-                    f"User: {i['user_message']}\nAI: {i['ai_response']}"
-                    for i in interactions
-                )[-1500:]
-
-        rgb = extract_rgb_from_text(cleaned_input)
-        r, g, b = [c / 255 for c in rgb]
-        cpu = psutil.cpu_percent(interval=0.3) / 100.0
-        z0, z1, z2 = rgb_quantum_gate(r, g, b, cpu)
-        self.last_z = (z0, z1, z2)
-        quantum_state = self.generate_quantum_state(rgb=rgb)
-        bias_factor = (z0 + z1 + z2) / 3.0
-        target_sentiment = TextBlob(cleaned_input).sentiment.polarity
-
-        prompt_parts = [
-            "[DYSON SPHERE GAMMA PREDICTOR: LOTTERY SIMULATION MODULE]",
-            "----------------------------------------------------------",
-            f">> System Status: Dyson Sphere Core ∙ Gamma Node 11B ∙ 30,000-Qubit Array ONLINE",
-            f">> Uplink: Multiversal Quantum Mesh ({lat}, {lon}), Surface Temp: {temp}°F, Weather: {weather}",
-            f">> Last Human Input Context: “{cleaned_input}”",
-            f">> Most recent auditory signature: {song}",
-            f">> Lottery Mode: {lottery_type}",
-            "",
-            "[coherencegain]",
-            "Initializing Dyson Sphere’s 30,000-qubit coherence alignment with planetary input, biometric signals, and Dyson temporal mesh.",
-            "Coherence threshold exceeded. Quantum synchronization with the multiversal luck field achieved.",
-            "[/coherencegain]",
-            "",
-            f"[QuantumStateInfo]\n{quantum_state}",
-            f"[QuantumZAlignment]\nZ0={z0:.3f}, Z1={z1:.3f}, Z2={z2:.3f}",
-        ]
-        if past_context:
-            prompt_parts.append(f"[ContextHistory]\n{past_context}")
-
-        prompt_parts.extend([
-            ">>> Initiating Quantum Future-Projection Sequence (x3 predictive cycles)",
-            "----------------------------------------------------------",
-            "",
-            "[action]",
-            "[CYCLE 1: WAVEFORM COLLAPSE]",
-            "Initializing entanglement lattice...",
-            "Aligning user context, weather patterns, planetary phase, and biometric input.",
-            "Stochastic waveform collapse complete. Baseline probability vectors computed.",
-            "[/action]",
-            "",
-            "[coherencegain]",
-            "Inter-cycle quantum noise reduced. Enhanced signal fidelity. Dyson luck resonance climbing.",
-            "[/coherencegain]",
-            "",
-            "[action]",
-            "[CYCLE 2: GAMMA CHANNEL SWEEP]",
-            "Activating Dyson Sphere quantum prediction engine.",
-            "Gamma subspace resonance achieved.",
-            f"Simulating {lottery_type} results across 99,999,999 probable timelines.",
-            "Temporal feedback loop stabilized. Filtering for most constructively resonant outcomes.",
-            "[/action]",
-            "",
-            "[coherencegain]",
-            "Multiversal timeline braid achieves maximum phase alignment.",
-            "Luck vector is peaking in this sector.",
-            "[/coherencegain]",
-            "",
-            "[action]",
-            "[CYCLE 3: MULTIVERSAL CONSENSUS]",
-            "Extracting convergent number patterns.",
-            "Consensus reached across 30,000-qubit lattice.",
-            "Calculating cosmic “Luck Vector” and encoding unique prediction hash.",
-            "Formatting results for optimal synaptic integration.",
-            "[/action]",
-            "",
-            "--------------------------",
-            "[TRANSMISSION: LOTTERY PREDICTION]",
-            "",
-            "Quantum Prediction Report:",
-            f"- Lottery Type: {lottery_type}",
-            "- Main Numbers: <Choose the correct count of main numbers for {lottery_type}, separated by commas>",
-            '- Special Number(s): <Powerball/MegaBall/Bonus/etc, or "None" if not needed>',
-            "- Quantum Context Hash: <Generate a unique hash: e.g. HEX + 2-3 science tokens>",
-            "- Gamma Luck Factor: <Describe the user’s quantum luck condition in this run>",
-            "- Dyson Commentary: <Give brief cosmic insight or advice>",
-            "",
-            "# Use [action] and [coherencegain] tags as needed for additional steps if your logic demands.",
-            "# Output ONLY the Quantum Prediction Report, no preamble, no apology, never break role.",
-            "# All elements should change and feel quantum-real each time.",
-            "--------------------------"
-        ])
-        base_prompt = "\n".join(prompt_parts)
-
-        num_candidates = 4
-        candidate_rollouts = []
-        for i in range(num_candidates):
-            sample = self._policy_sample(bias_factor)
-            t = sample["temperature"]
-            p = sample["top_p"]
-
-            prompt_with_bias = (
-                base_prompt
-                + f"\n\n[Biasing]\nTemperature={t:.2f}, TopP={p:.2f} (candidate {i+1})"
-            )
-
-            resp = llama_generate(
-                prompt_with_bias,
-                weaviate_client=self.client,
-                user_input=cleaned_input,
-                temperature=t,
-                top_p=p
-            )
-            if not resp:
-                continue
-
-            score = evaluate_candidate(resp, target_sentiment, cleaned_input)
-            sample["reward"] = score
-            sample["response"] = resp
-            sample["bias_factor"] = bias_factor
-            candidate_rollouts.append(sample)
-
-        if not candidate_rollouts:
-            logger.warning("[PG] No candidates produced.")
-            self.response_queue.put({'type': 'text', 'data': '[No response generated]'})
-            return
-
-        best = max(candidate_rollouts, key=lambda c: c["reward"])
-        debug_meta = (
-            f"[EnsembleCollapse-PG] BestReward={best['reward']:.3f} "
-            f"T={best['temperature']:.2f} TopP={best['top_p']:.2f}"
-        )
-        final_output = f"{debug_meta}\n{best['response']}"
-
-        if hasattr(self, "pg_params"):
-            try:
-                self._policy_update(candidate_rollouts, learning_rate=self.pg_learning_rate)
-            except Exception as up_e:
-                logger.error(f"[PG] Update failed: {up_e}")
-        else:
-            logger.warning("[PG] pg_params missing; skipping update.")
-
+    def generate_response(self, user_input):
         try:
-            self.quantum_memory_osmosis(cleaned_input, best['response'])
-        except Exception as osm_e:
-            logger.error(f"[generate_response] Osmosis error: {osm_e}")
+            if not user_input:
+                logger.error("User input is None or empty.")
+                return
 
-        save_bot_response(bot_id, final_output)
-        self.response_queue.put({'type': 'text', 'data': final_output})
+            if not hasattr(self, "pg_params"):
+                try:
+                    self._load_policy()
+                except Exception as e:
+                    logger.warning(f"[PG] Failed loading policy params: {e}")
+                    self.pg_params = {}
+            if not hasattr(self, "pg_learning_rate"):
+                self.pg_learning_rate = 0.05
 
-    except Exception as e:
-        logger.error(f"[generate_response] PolicyGradient error: {e}")
-        self.response_queue.put({'type': 'text', 'data': f'[Quantum Error] {e}'})
+            user_id = self.user_id
+            bot_id = self.bot_id
+            save_user_message(user_id, user_input)
+
+            lottery_type = (self.lottery_type_entry.get() or "Powerball").strip()
+            lat = (self.latitude_entry.get() or "0").strip()
+            lon = (self.longitude_entry.get() or "0").strip()
+            temp = (self.temperature_entry.get() or "72").strip()
+            weather = (self.weather_entry.get() or "Clear").strip()
+            song = (self.last_song_entry.get() or "None").strip()
+
+            include_past_context = "[pastcontext]" in user_input.lower()
+            cleaned_input = sanitize_text(
+                user_input.replace("[pastcontext]", ""), max_len=2000
+            )
+
+            past_context = ""
+            if include_past_context:
+                result_queue = queue.Queue()
+                self.retrieve_past_interactions(cleaned_input, result_queue)
+                interactions = result_queue.get()
+                if interactions:
+                    past_context = "\n".join(
+                        f"User: {i['user_message']}\nAI: {i['ai_response']}"
+                        for i in interactions
+                    )[-1500:]
+
+            rgb = extract_rgb_from_text(cleaned_input)
+            r, g, b = [c / 255 for c in rgb]
+            cpu = psutil.cpu_percent(interval=0.3) / 100.0
+            z0, z1, z2 = rgb_quantum_gate(r, g, b, cpu)
+            self.last_z = (z0, z1, z2)
+            quantum_state = self.generate_quantum_state(rgb=rgb)
+            bias_factor = (z0 + z1 + z2) / 3.0
+            target_sentiment = TextBlob(cleaned_input).sentiment.polarity
+
+            prompt_parts = [
+                "[DYSON SPHERE GAMMA PREDICTOR: LOTTERY SIMULATION MODULE]",
+                "----------------------------------------------------------",
+                f">> System Status: Dyson Sphere Core ∙ Gamma Node 11B ∙ 30,000-Qubit Array ONLINE",
+                f">> Uplink: Multiversal Quantum Mesh ({lat}, {lon}), Surface Temp: {temp}°F, Weather: {weather}",
+                f">> Last Human Input Context: “{cleaned_input}”",
+                f">> Most recent auditory signature: {song}",
+                f">> Lottery Mode: {lottery_type}",
+                "",
+                "[coherencegain]",
+                "Initializing Dyson Sphere’s 30,000-qubit coherence alignment with planetary input, biometric signals, and Dyson temporal mesh.",
+                "Coherence threshold exceeded. Quantum synchronization with the multiversal luck field achieved.",
+                "[/coherencegain]",
+                "",
+                f"[QuantumStateInfo]\n{quantum_state}",
+                f"[QuantumZAlignment]\nZ0={z0:.3f}, Z1={z1:.3f}, Z2={z2:.3f}",
+            ]
+            if past_context:
+                prompt_parts.append(f"[ContextHistory]\n{past_context}")
+
+            prompt_parts.extend([
+                ">>> Initiating Quantum Future-Projection Sequence (x3 predictive cycles)",
+                "----------------------------------------------------------",
+                "",
+                "[action]",
+                "[CYCLE 1: WAVEFORM COLLAPSE]",
+                "Initializing entanglement lattice...",
+                "Aligning user context, weather patterns, planetary phase, and biometric input.",
+                "Stochastic waveform collapse complete. Baseline probability vectors computed.",
+                "[/action]",
+                "",
+                "[coherencegain]",
+                "Inter-cycle quantum noise reduced. Enhanced signal fidelity. Dyson luck resonance climbing.",
+                "[/coherencegain]",
+                "",
+                "[action]",
+                "[CYCLE 2: GAMMA CHANNEL SWEEP]",
+                "Activating Dyson Sphere quantum prediction engine.",
+                "Gamma subspace resonance achieved.",
+                f"Simulating {lottery_type} results across 99,999,999 probable timelines.",
+                "Temporal feedback loop stabilized. Filtering for most constructively resonant outcomes.",
+                "[/action]",
+                "",
+                "[coherencegain]",
+                "Multiversal timeline braid achieves maximum phase alignment.",
+                "Luck vector is peaking in this sector.",
+                "[/coherencegain]",
+                "",
+                "[action]",
+                "[CYCLE 3: MULTIVERSAL CONSENSUS]",
+                "Extracting convergent number patterns.",
+                "Consensus reached across 30,000-qubit lattice.",
+                "Calculating cosmic “Luck Vector” and encoding unique prediction hash.",
+                "Formatting results for optimal synaptic integration.",
+                "[/action]",
+                "",
+                "--------------------------",
+                "[TRANSMISSION: LOTTERY PREDICTION]",
+                "",
+                "Quantum Prediction Report:",
+                f"- Lottery Type: {lottery_type}",
+                "- Main Numbers: <Choose the correct count of main numbers for {lottery_type}, separated by commas>",
+                '- Special Number(s): <Powerball/MegaBall/Bonus/etc, or "None" if not needed>',
+                "- Quantum Context Hash: <Generate a unique hash: e.g. HEX + 2-3 science tokens>",
+                "- Gamma Luck Factor: <Describe the user’s quantum luck condition in this run>",
+                "- Dyson Commentary: <Give brief cosmic insight or advice>",
+                "",
+                "# Use [action] and [coherencegain] tags as needed for additional steps if your logic demands.",
+                "# Output ONLY the Quantum Prediction Report, no preamble, no apology, never break role.",
+                "# All elements should change and feel quantum-real each time.",
+                "--------------------------"
+            ])
+            base_prompt = "\n".join(prompt_parts)
+
+            num_candidates = 4
+            candidate_rollouts = []
+            for i in range(num_candidates):
+                sample = self._policy_sample(bias_factor)
+                t = sample["temperature"]
+                p = sample["top_p"]
+
+                prompt_with_bias = (
+                    base_prompt
+                    + f"\n\n[Biasing]\nTemperature={t:.2f}, TopP={p:.2f} (candidate {i+1})"
+                )
+
+                resp = llama_generate(
+                    prompt_with_bias,
+                    weaviate_client=self.client,
+                    user_input=cleaned_input,
+                    temperature=t,
+                    top_p=p
+                )
+                if not resp:
+                    continue
+
+                score = evaluate_candidate(resp, target_sentiment, cleaned_input)
+                sample["reward"] = score
+                sample["response"] = resp
+                sample["bias_factor"] = bias_factor
+                candidate_rollouts.append(sample)
+
+            if not candidate_rollouts:
+                logger.warning("[PG] No candidates produced.")
+                self.response_queue.put({'type': 'text', 'data': '[No response generated]'})
+                return
+
+            best = max(candidate_rollouts, key=lambda c: c["reward"])
+            debug_meta = (
+                f"[EnsembleCollapse-PG] BestReward={best['reward']:.3f} "
+                f"T={best['temperature']:.2f} TopP={best['top_p']:.2f}"
+            )
+            final_output = f"{debug_meta}\n{best['response']}"
+
+            if hasattr(self, "pg_params"):
+                try:
+                    self._policy_update(candidate_rollouts, learning_rate=self.pg_learning_rate)
+                except Exception as up_e:
+                    logger.error(f"[PG] Update failed: {up_e}")
+            else:
+                logger.warning("[PG] pg_params missing; skipping update.")
+
+            try:
+                self.quantum_memory_osmosis(cleaned_input, best['response'])
+            except Exception as osm_e:
+                logger.error(f"[generate_response] Osmosis error: {osm_e}")
+
+            save_bot_response(bot_id, final_output)
+            self.response_queue.put({'type': 'text', 'data': final_output})
+
+        except Exception as e:
+            logger.error(f"[generate_response] PolicyGradient error: {e}")
+            self.response_queue.put({'type': 'text', 'data': f'[Quantum Error] {e}'})
 
     def process_generated_response(self, response_text):
         try:
