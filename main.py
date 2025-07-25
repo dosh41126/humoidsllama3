@@ -806,39 +806,42 @@ def fetch_relevant_info(chunk, client, user_input):
         logger.error(f"Weaviate query failed: {e}")
         return ""
 
-def llama_generate(prompt, weaviate_client=None, user_input=None):
-   config = load_config()
-   max_tokens = config.get('MAX_TOKENS', 2500)
-   chunk_size = config.get('CHUNK_SIZE', 358)
-   try:
-       prompt_chunks = [prompt[i:i + chunk_size] for i in range(0, len(prompt), chunk_size)]
-       responses = []
-       last_output = ""
-       memory = ""
 
-       for i, current_chunk in enumerate(prompt_chunks):
-           relevant_info = fetch_relevant_info(current_chunk, weaviate_client, user_input)
-           combined_chunk = f"{relevant_info} {current_chunk}"
-           token = determine_token(combined_chunk, memory)
-           output = tokenize_and_generate(combined_chunk, token, max_tokens, chunk_size)
+def llama_generate(prompt, weaviate_client=None, user_input=None, temperature=1.0, top_p=0.9):
+    config = load_config()
+    max_tokens = config.get('MAX_TOKENS', 2500)
+    chunk_size = config.get('CHUNK_SIZE', 358)
+    try:
+        prompt_chunks = [prompt[i:i + chunk_size] for i in range(0, len(prompt), chunk_size)]
+        responses = []
+        last_output = ""
+        memory = ""
 
-           if output is None:
-               logger.error(f"Failed to generate output for chunk: {combined_chunk}")
-               continue
+        for i, current_chunk in enumerate(prompt_chunks):
+            relevant_info = fetch_relevant_info(current_chunk, weaviate_client, user_input)
+            combined_chunk = f"{relevant_info} {current_chunk}"
+            token = determine_token(combined_chunk, memory)
+            output = tokenize_and_generate(combined_chunk, token, max_tokens, chunk_size, temperature, top_p)
 
-           if i > 0 and last_output:
-               overlap = find_max_overlap(last_output, output)
-               output = output[overlap:]
+            if output is None:
+                logger.error(f"Failed to generate output for chunk: {combined_chunk}")
+                continue
 
-           memory += output
-           responses.append(output)
-           last_output = output
+            if i > 0 and last_output:
+                overlap = find_max_overlap(last_output, output)
+                output = output[overlap:]
 
-       final_response = ''.join(responses)
-       return final_response if final_response else None
-   except Exception as e:
-       logger.error(f"Error in llama_generate: {e}")
-       return None
+            memory += output
+            responses.append(output)
+            last_output = output
+
+        final_response = ''.join(responses)
+        return final_response if final_response else None
+
+    except Exception as e:
+        logger.error(f"Error in llama_generate: {e}")
+        return None
+
 
 def tokenize_and_generate(chunk, token, max_tokens, chunk_size):
    try:
@@ -985,9 +988,8 @@ class App(customtkinter.CTk):
             else:
                 weather_scalar = 0.0
 
-            tempo = 120  # static for now
+            tempo = 120 
 
-            # 🔁 Use quantum history feedback
             z0_hist, z1_hist, z2_hist = self.last_z
 
             z0, z1, z2 = rgb_quantum_gate(
@@ -1003,7 +1005,7 @@ class App(customtkinter.CTk):
                 z2_hist=z2_hist
             )
 
-            # ✅ Save this quantum state for next use
+
             self.last_z = (z0, z1, z2)
 
             source = "Live" if is_live else "Manual"
@@ -1192,7 +1194,6 @@ class App(customtkinter.CTk):
 
         return mapped_classes
 
-
     def generate_response(self, user_input):
         try:
             if not user_input:
@@ -1221,7 +1222,11 @@ class App(customtkinter.CTk):
             rgb = extract_rgb_from_text(cleaned_input)
             r, g, b = [c / 255 for c in rgb]
             cpu = psutil.cpu_percent(interval=0.3) / 100.0
+
             z0, z1, z2 = rgb_quantum_gate(r, g, b, cpu)
+            bias_factor = (z0 + z1 + z2) / 3.0
+            temperature = max(0.2, min(1.5, 1.0 + bias_factor))
+            top_p = max(0.2, min(1.0, 0.9 - 0.5 * abs(bias_factor)))
 
             quantum_state = self.generate_quantum_state(rgb=rgb)
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1230,6 +1235,7 @@ class App(customtkinter.CTk):
             prompt_parts = [
                 f"[QuantumStateInfo]\n{quantum_state}",
                 f"[QuantumZAlignment]\nZ0={z0:.3f}, Z1={z1:.3f}, Z2={z2:.3f}",
+                f"[Biasing]\nTemperature={temperature:.2f}, TopP={top_p:.2f}",
             ]
 
             if past_context:
@@ -1239,11 +1245,15 @@ class App(customtkinter.CTk):
             prompt_parts.append("[Assistant]")
 
             final_prompt = "\n\n".join(prompt_parts)
-
             logger.info(f"[generate_response] Final prompt:\n{final_prompt}")
 
-            # Generate with LLaMA
-            response = llama_generate(final_prompt, self.client, cleaned_input)
+            response = llama_generate(
+                final_prompt,
+                weaviate_client=self.client,
+                user_input=cleaned_input,
+                temperature=temperature,
+                top_p=top_p,
+            )
 
             if response:
                 logger.info(f"[generate_response] Response: {response}")
@@ -1252,9 +1262,11 @@ class App(customtkinter.CTk):
             else:
                 logger.warning("LLaMA returned no response.")
                 self.response_queue.put({'type': 'text', 'data': '[No response generated]'})
+
         except Exception as e:
             logger.error(f"[generate_response] Error: {e}")
             self.response_queue.put({'type': 'text', 'data': f"[Error] {e}"})
+
 
 
     def process_generated_response(self, response_text):
