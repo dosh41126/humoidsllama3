@@ -906,6 +906,7 @@ class App(customtkinter.CTk):
         self.response_queue = queue.Queue()
         self.client = weaviate.Client(url=WEAVIATE_ENDPOINT)
         self.executor = ThreadPoolExecutor(max_workers=4)
+        self.last_z = (0.0, 0.0, 0.0)
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.executor.shutdown(wait=True)
@@ -986,6 +987,9 @@ class App(customtkinter.CTk):
 
             tempo = 120  # static for now
 
+            # 🔁 Use quantum history feedback
+            z0_hist, z1_hist, z2_hist = self.last_z
+
             z0, z1, z2 = rgb_quantum_gate(
                 r, g, b,
                 cpu_usage=cpu,
@@ -993,8 +997,14 @@ class App(customtkinter.CTk):
                 lat=lat,
                 lon=lon,
                 temperature_f=temp_f,
-                weather_scalar=weather_scalar
+                weather_scalar=weather_scalar,
+                z0_hist=z0_hist,
+                z1_hist=z1_hist,
+                z2_hist=z2_hist
             )
+
+            # ✅ Save this quantum state for next use
+            self.last_z = (z0, z1, z2)
 
             source = "Live" if is_live else "Manual"
 
@@ -1008,6 +1018,7 @@ class App(customtkinter.CTk):
         except Exception as e:
             logger.error(f"Error in generate_quantum_state: {e}")
             return "[QuantumGate] error"
+
 
 
     def fetch_relevant_info_internal(self, chunk):
