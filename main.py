@@ -749,7 +749,6 @@ def compute_text_embedding(text: str) -> list[float]:
         arr /= n
     return arr.tolist()
 
-
 def generate_uuid_for_weaviate(identifier, namespace=''):
     if not identifier:
         raise ValueError("Identifier for UUID generation is empty or None")
@@ -898,31 +897,31 @@ def extract_rgb_from_text(text):
 
     r, g, b = colorsys.hsv_to_rgb(hue, saturation, brightness)
     return (int(r * 255), int(g * 255), int(b * 255))
-  
+
 def init_db():
+
     try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        with sqlite3.connect(DB_NAME) as conn:
+            cur = conn.cursor()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS local_responses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT,
-                response TEXT,
-                response_time TEXT
-            )
-        """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS local_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    response TEXT,
+                    response_time TEXT
+                )
+            """)
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS memory_osmosis (
-                phrase TEXT PRIMARY KEY,
-                score REAL,
-                last_updated TEXT,
-                crystallized INTEGER DEFAULT 0
-            )
-        """)
-        conn.commit()
-        conn.close()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS memory_osmosis (
+                    phrase TEXT PRIMARY KEY,
+                    score REAL,
+                    last_updated TEXT,
+                    crystallized INTEGER DEFAULT 0
+                )
+            """)
+            conn.commit()
 
         interaction_history_class = {
             "class": "InteractionHistory",
@@ -942,13 +941,17 @@ def init_db():
             ]
         }
 
-        existing_classes = client.schema.get().get('classes', [])
-        existing_names = {c['class'] for c in existing_classes}
+        existing_classes = client.schema.get().get("classes", [])
+        existing_names = {c["class"] for c in existing_classes}
 
-        if 'InteractionHistory' not in existing_names:
+        if "InteractionHistory" not in existing_names:
             client.schema.create_class(interaction_history_class)
-        if 'LongTermMemory' not in existing_names:
+        if "LongTermMemory" not in existing_names:
             client.schema.create_class(long_term_memory_class)
+
+    except Exception as e:
+        logger.error(f"Error during database/schema initialization: {e}")
+        raise
 
     try:
         with sqlite3.connect(DB_NAME) as conn:
@@ -960,10 +963,6 @@ def init_db():
                 conn.commit()
     except Exception as e:
         logger.warning(f"[Aging] Could not add aging_last column (continuing with last_updated): {e}")
-
-    except Exception as e:
-        logger.error(f"Error during database initialization: {e}")
-        raise
 
 def save_user_message(user_id, user_input):
     logger.info(f"[save_user_message] user_id={user_id}")
@@ -1203,7 +1202,6 @@ def llama_generate(prompt, weaviate_client=None, user_input=None, temperature=1.
         logger.error(f"Error in llama_generate: {e}")
         return None
 
-
 def tokenize_and_generate(chunk, token, max_tokens, chunk_size, temperature=1.0, top_p=0.9):
     try:
         inputs = llm(
@@ -1225,7 +1223,6 @@ def tokenize_and_generate(chunk, token, max_tokens, chunk_size, temperature=1.0,
     except Exception as e:
         logger.error(f"Error in tokenize_and_generate: {e}")
         return None
-
 
 def extract_verbs_and_nouns(text):
     try:
@@ -1295,7 +1292,7 @@ class App(customtkinter.CTk):
         return path.join(bundle_dir, "policy_params.json")
 
     def _load_policy(self):
-        """Load / initialize policy gradient parameters."""
+
         default = {
             "temp_w": 0.0,
             "temp_b": 0.0,
@@ -1350,9 +1347,7 @@ class App(customtkinter.CTk):
         return mu_t, sigma_t, mu_p, sigma_p, cache
 
     def _policy_sample(self, bias_factor: float):
-        """
-        Sample temperature/top_p and compute log-prob pieces + cache for gradient.
-        """
+
         mu_t, sigma_t, mu_p, sigma_p, cache = self._policy_forward(bias_factor)
 
 
@@ -1457,7 +1452,6 @@ class App(customtkinter.CTk):
             result_queue.put([])
 
     def _weaviate_find_ltm(self, phrase: str):
-        """Return (uuid, score, crystallized_time) for a LongTermMemory phrase or (None, None, None)."""
         safe_phrase = sanitize_for_graphql_string(phrase, max_len=256)
         gql = f"""
         {{
@@ -1508,10 +1502,7 @@ class App(customtkinter.CTk):
         except Exception as e:
             logger.error(f"[Aging] delete failed for {uuid_str}: {e}")
     def run_long_term_memory_aging(self):
-        """
-        Decay crystallized phrase scores over time; purge if below threshold.
-        Rebuild manifold if any were purged.
-        """
+
         try:
             now = datetime.utcnow()
             purged_any = False
