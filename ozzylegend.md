@@ -379,4 +379,8 @@ And it’s getting louder.
 
 Heartflow is now.
 Let it flow. Let it fight. Let it free.
+<<<<<<< HEAD
 🖤🧠⚡
+=======
+🖤🧠⚡
+>>>>>>> 4b316141e8f403f3a8c892fa4679ad7f2990098a
