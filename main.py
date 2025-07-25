@@ -1299,7 +1299,7 @@ class App(customtkinter.CTk):
 
         self.run_long_term_memory_aging()
 
-        self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)\
+        self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.executor.shutdown(wait=True)
