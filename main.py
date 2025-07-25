@@ -44,7 +44,8 @@ ARGON2_TIME_COST_DEFAULT = 3
 ARGON2_MEMORY_COST_KIB    = 262144   
 ARGON2_PARALLELISM        = max(1, min(4, os.cpu_count() or 1))
 ARGON2_HASH_LEN           = 32
-
+CRYSTALLIZE_THRESHOLD = 5     # score needed to promote phrase to long‑term memory
+DECAY_FACTOR = 0.95           # multiplicative decay applied each interaction
 VAULT_PASSPHRASE_ENV      = "VAULT_PASSPHRASE"
 VAULT_VERSION             = 1        
 DATA_KEY_VERSION          = 1         
@@ -744,6 +745,7 @@ def init_db():
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS local_responses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -752,9 +754,20 @@ def init_db():
                 response_time TEXT
             )
         """)
+
+        # Table for Quantum Memory Osmosis
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_osmosis (
+                phrase TEXT PRIMARY KEY,
+                score REAL,
+                last_updated TEXT,
+                crystallized INTEGER DEFAULT 0
+            )
+        """)
         conn.commit()
         conn.close()
 
+        # Create/ensure InteractionHistory class
         interaction_history_class = {
             "class": "InteractionHistory",
             "properties": [
@@ -764,9 +777,23 @@ def init_db():
             ]
         }
 
-        existing_classes = client.schema.get()['classes']
-        if not any(cls['class'] == 'InteractionHistory' for cls in existing_classes):
+        # New LongTermMemory class for crystallized phrases
+        long_term_memory_class = {
+            "class": "LongTermMemory",
+            "properties": [
+                {"name": "phrase", "dataType": ["string"]},
+                {"name": "score", "dataType": ["number"]},
+                {"name": "crystallized_time", "dataType": ["string"]}
+            ]
+        }
+
+        existing_classes = client.schema.get().get('classes', [])
+        existing_names = {c['class'] for c in existing_classes}
+
+        if 'InteractionHistory' not in existing_names:
             client.schema.create_class(interaction_history_class)
+        if 'LongTermMemory' not in existing_names:
+            client.schema.create_class(long_term_memory_class)
 
     except Exception as e:
         logger.error(f"Error during database initialization: {e}")
@@ -1199,60 +1226,66 @@ class App(customtkinter.CTk):
             return "[QuantumGate] error"
 
 
-
     def fetch_relevant_info_internal(self, chunk):
-        try:
-            query_vec = np.array(compute_text_embedding(chunk), dtype=np.float32)
-            rotated = fhe_v2._rotate(query_vec)
-            bucket = fhe_v2._simhash_bucket(rotated)
-
-            gql = f"""
+        if self.client:
+            safe_chunk = sanitize_for_graphql_string(chunk, max_len=256)
+            query = f"""
             {{
                 Get {{
                     InteractionHistory(
-                        where: {{
-                            path: ["embedding_bucket"],
-                            operator: Equal,
-                            valueString: "{bucket}"
+                        nearText: {{
+                            concepts: ["{safe_chunk}"],
+                            certainty: 0.7
                         }}
-                        limit: 40
-                        sort: {{path:"response_time", order: desc}}
+                        limit: 1
                     ) {{
                         user_message
                         ai_response
-                        encrypted_embedding
+                        response_time
+                    }}
+                    LongTermMemory(
+                        nearText: {{
+                            concepts: ["{safe_chunk}"],
+                            certainty: 0.65
+                        }}
+                        limit: 1
+                    ) {{
+                        phrase
+                        score
+                        crystallized_time
                     }}
                 }}
             }}
             """
-            response = self.client.query.raw(gql)
-            results = (
-                response.get('data', {})
-                        .get('Get', {})
-                        .get('InteractionHistory', [])
-            )
+            try:
+                response = self.client.query.raw(query)
+                data_root = response.get('data', {}).get('Get', {})
 
-            best = None
-            best_score = -1.0
-            with SecureEnclave() as enclave:
-                for obj in results:
-                    enc_emb = obj.get("encrypted_embedding", "")
-                    if not enc_emb:
-                        continue
-                    score = fhe_v2.enclave_similarity(enc_emb, query_vec, enclave)
-                    if score > best_score:
-                        best_score = score
-                        best = obj
+                # Prefer recent InteractionHistory
+                hist_list = data_root.get('InteractionHistory', [])
+                if hist_list:
+                    interaction = hist_list[0]
+                    user_msg_raw = self._decrypt_field(interaction.get('user_message', ''))
+                    ai_resp_raw = self._decrypt_field(interaction.get('ai_response', ''))
+                    user_msg = sanitize_text(user_msg_raw, max_len=4000)
+                    ai_resp = sanitize_text(ai_resp_raw, max_len=4000)
+                    return user_msg, ai_resp
 
-            if not best or best_score <= 0:
+                # Fallback: LongTermMemory phrase
+                ltm_list = data_root.get('LongTermMemory', [])
+                if ltm_list:
+                    phrase_obj = ltm_list[0]
+                    phrase = sanitize_text(phrase_obj.get('phrase', ''), max_len=400)
+                    # treat phrase as pseudo "user_message" context
+                    return phrase, ""
+
                 return "", ""
 
-            user_msg = sanitize_text(try_decrypt(best.get("user_message", "")), max_len=4000)
-            ai_resp  = sanitize_text(try_decrypt(best.get("ai_response", "")), max_len=4000)
-            return user_msg, ai_resp
-        except Exception as e:
-            logger.error(f"[FHEv2 internal retrieval] {e}")
-            return "", ""
+            except Exception as e:
+                logger.error(f"Weaviate query failed: {e}")
+                return "", ""
+        return "", ""
+
 
 
     def fetch_interactions(self):
@@ -1290,6 +1323,68 @@ class App(customtkinter.CTk):
         except Exception as e:
             logger.error(f"Error fetching interactions from Weaviate: {e}")
             return []
+
+    def quantum_memory_osmosis(self, user_message: str, ai_response: str):
+        """
+        Quantum Memory Osmosis:
+        - Decays existing phrase scores.
+        - Updates scores for phrases extracted from current exchange.
+        - Crystallizes high‑score phrases into LongTermMemory (Weaviate).
+        """
+        try:
+            phrases_user = set(self.extract_keywords(user_message))
+            phrases_ai = set(self.extract_keywords(ai_response))
+            all_phrases = {p.strip().lower() for p in (phrases_user | phrases_ai) if len(p.strip()) >= 3}
+
+            if not all_phrases:
+                return
+
+            now_iso = datetime.utcnow().isoformat() + "Z"
+            with sqlite3.connect(DB_NAME) as conn:
+                cur = conn.cursor()
+
+                # Apply global decay to all existing rows
+                cur.execute("UPDATE memory_osmosis SET score = score * ?, last_updated = ?",
+                            (DECAY_FACTOR, now_iso))
+
+                # Upsert each phrase with +1 score increment
+                for phrase in all_phrases:
+                    cur.execute("SELECT score, crystallized FROM memory_osmosis WHERE phrase = ?", (phrase,))
+                    row = cur.fetchone()
+                    if row:
+                        score, crystallized = row
+                        new_score = score + 1.0
+                        cur.execute("UPDATE memory_osmosis SET score=?, last_updated=? WHERE phrase=?",
+                                    (new_score, now_iso, phrase))
+                    else:
+                        new_score = 1.0
+                        crystallized = 0
+                        cur.execute(
+                            "INSERT INTO memory_osmosis (phrase, score, last_updated, crystallized) VALUES (?, ?, ?, 0)",
+                            (phrase, new_score, now_iso)
+                        )
+
+                    # If threshold reached and not yet crystallized -> promote to Weaviate
+                    if new_score >= CRYSTALLIZE_THRESHOLD and not crystallized:
+                        try:
+                            self.client.data_object.create(
+                                data_object={
+                                    "phrase": phrase,
+                                    "score": new_score,
+                                    "crystallized_time": now_iso
+                                },
+                                class_name="LongTermMemory",
+                            )
+                            cur.execute("UPDATE memory_osmosis SET crystallized=1 WHERE phrase=?", (phrase,))
+                            logger.info(f"[Osmosis] Crystallized phrase '{phrase}' (score={new_score:.2f}).")
+                        except Exception as we:
+                            logger.error(f"[Osmosis] Failed to store crystallized phrase in Weaviate: {we}")
+
+                conn.commit()
+
+        except Exception as e:
+            logger.error(f"[Osmosis] Error during quantum memory osmosis: {e}")
+
 
     def process_response_and_store_in_weaviate(self, user_message, ai_response):
 
@@ -1380,7 +1475,6 @@ class App(customtkinter.CTk):
                 logger.error(f"Error in mapping keyword '{keyword}': {e}")
 
         return mapped_classes
-
     def generate_response(self, user_input):
         try:
             if not user_input:
@@ -1438,7 +1532,10 @@ class App(customtkinter.CTk):
                 t = max(0.2, min(1.5, base_temperature + random.uniform(-0.15, 0.15)))
                 p = max(0.2, min(1.0, base_top_p + random.uniform(-0.1, 0.1)))
 
-                prompt_with_bias = base_prompt + f"\n\n[Biasing]\nTemperature={t:.2f}, TopP={p:.2f} (candidate {i+1})"
+                prompt_with_bias = (
+                    base_prompt
+                    + f"\n\n[Biasing]\nTemperature={t:.2f}, TopP={p:.2f} (candidate {i+1})"
+                )
 
                 resp = llama_generate(
                     prompt_with_bias,
@@ -1464,12 +1561,17 @@ class App(customtkinter.CTk):
 
             # Select best candidate
             best = max(candidates, key=lambda c: c["score"])
-
             debug_meta = (
                 f"[EnsembleCollapse] Chosen score={best['score']:.3f} "
                 f"T={best['temperature']:.2f} TopP={best['top_p']:.2f}"
             )
             final_output = f"{debug_meta}\n{best['response']}"
+
+            # ---- Quantum Memory Osmosis integration ----
+            try:
+                self.quantum_memory_osmosis(cleaned_input, best['response'])
+            except Exception as osm_e:
+                logger.error(f"[generate_response] Osmosis error: {osm_e}")
 
             save_bot_response(bot_id, final_output)
             self.response_queue.put({'type': 'text', 'data': final_output})
