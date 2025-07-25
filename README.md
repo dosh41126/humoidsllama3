@@ -1,6 +1,3 @@
-Below is an *extended* (≈3000‑word) research‑style article that augments the prior manuscript. Every core architectural “idea” is now formalized with explicit mathematical equations.
-
----
 
 ## Title
 
