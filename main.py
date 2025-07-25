@@ -184,7 +184,6 @@ class SecureEnclave:
                 pass
         self._buffers.clear()
 
-
 class AdvancedHomomorphicVectorMemory:
 
     AAD_CONTEXT = _aad_str("fhe", "embeddingv2")
@@ -271,9 +270,7 @@ class AdvancedHomomorphicVectorMemory:
         dec = enclave.track(self.decrypt_embedding(enc_a))
         return self.cosine(dec, query_vec)
 
-
 fhe_v2 = AdvancedHomomorphicVectorMemory()
-
 
 class SecureKeyManager:
 
@@ -513,9 +510,9 @@ class SecureKeyManager:
         self.active_version = new_version
         logging.info(f"[SecureKeyManager] Installed new key version {new_version}.")
         return new_version
-    # ==== Self‑Mutating Cryptographic Vault via Quantum Differential Evolution ====
+
     def _entropy_bits(self, secret_bytes: bytes) -> float:
-        """Approximate Shannon entropy (bits) of a candidate secret."""
+
         if not secret_bytes:
             return 0.0
         counts = Counter(secret_bytes)
@@ -527,10 +524,7 @@ class SecureKeyManager:
         return H
 
     def _resistance_score(self, secret_bytes: bytes) -> float:
-        """
-        Stub 'attack resistance' estimator.
-        Higher if secret is far (L2) from previous keys and has a flatter byte distribution.
-        """
+
         dist_component = 0.0
         try:
             arr_candidate = np.frombuffer(secret_bytes, dtype=np.uint8).astype(np.float32)
@@ -553,12 +547,7 @@ class SecureKeyManager:
                         noise_sigma: float = 12.0,
                         alpha: float = 1.0,
                         beta: float = 2.0) -> int:
-        """
-        Quantum Differential Evolution (simplified):
-        Generate noisy offspring of the active master key, evaluate secrecy
-        fitness F = alpha * H + beta * R_resistance, promote best as new key version.
-        Returns the new key version integer.
-        """
+
         vault_meta = self._load_vault()
         base_secret = None
         for kv in vault_meta["keys"]:
@@ -591,7 +580,7 @@ class SecureKeyManager:
         return new_version
 
     def _install_custom_master_secret(self, new_secret: bytes) -> int:
-        """Append provided master secret as next version and activate."""
+
         vault_body = self._load_vault()
         keys = vault_body["keys"]
         existing_versions = {int(k["version"]) for k in keys}
@@ -624,11 +613,7 @@ class SecureKeyManager:
 crypto = SecureKeyManager()  
 
 class TopologicalMemoryManifold:
-    """
-    Maintains a low-dimensional manifold for crystallized phrases using
-    a Laplacian Eigenmaps approximation. Retrieval performs geodesic
-    (graph shortest-path) walk to nearest phrases.
-    """
+
     def __init__(self, dim: int = 2, sigma: float = 0.75):
         self.dim = dim
         self.sigma = sigma
@@ -734,7 +719,6 @@ def evaluate_candidate(candidate_text: str, target_sentiment: float, cleaned_inp
 
     return 0.6 * sentiment_score + 0.4 * overlap
 
-
 def build_record_aad(user_id: str, *, source: str, table: str = "", cls: str = "") -> bytes:
 
     context_parts = [source]
@@ -797,7 +781,6 @@ def fetch_live_weather(lat: float, lon: float, fallback_temp_f: float = 70.0) ->
     except Exception as e:
         logger.warning(f"[Weather] Fallback due to error: {e}")
         return fallback_temp_f, 0, False
-
 
 dev = qml.device("default.qubit", wires=3)
 
@@ -898,7 +881,6 @@ def extract_rgb_from_text(text):
     arousal = (verb_count + adv_count) / max(1, word_count)
 
     dominance = (adj_count + 1) / (noun_count + 1) 
-
 
     hue_raw = ((1 - valence) * 120 + dominance * 20) % 360
     hue = hue_raw / 360.0
@@ -1290,8 +1272,6 @@ class App(customtkinter.CTk):
         self.client = weaviate.Client(url=WEAVIATE_ENDPOINT)
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.last_z = (0.0, 0.0, 0.0)
-
-        # Periodic aging + key mutation scheduling
         self.after(AGING_INTERVAL_SECONDS * 1000, self.memory_aging_scheduler)
         self.after(6 * 3600 * 1000, self._schedule_key_mutation)
 
@@ -1303,6 +1283,146 @@ class App(customtkinter.CTk):
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.executor.shutdown(wait=True)
+
+    def _policy_params_path(self):
+        return path.join(bundle_dir, "policy_params.json")
+
+    def _load_policy(self):
+        """Load / initialize policy gradient parameters."""
+        default = {
+            "temp_w": 0.0,
+            "temp_b": 0.0,
+            "temp_log_sigma": -0.7,   
+            "top_w": 0.0,
+            "top_b": 0.0,
+            "top_log_sigma": -0.7
+        }
+        try:
+            with open(self._policy_params_path(), "r") as f:
+                data = json.load(f)
+                for k, v in default.items():
+                    if k not in data:
+                        data[k] = v
+                self.pg_params = data
+        except Exception:
+            self.pg_params = default
+            self._save_policy()
+
+    def _save_policy(self):
+        try:
+            with open(self._policy_params_path(), "w") as f:
+                json.dump(self.pg_params, f, indent=2)
+        except Exception as e:
+            logger.error(f"[PG] Failed saving policy params: {e}")
+
+    def _sigmoid(self, x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x))
+
+    def _policy_forward(self, bias_factor: float):
+
+        p = self.pg_params
+
+        t_range = 1.5 - 0.2
+        raw_t = p["temp_w"] * bias_factor + p["temp_b"]
+        sig_t = self._sigmoid(raw_t)
+        mu_t = 0.2 + sig_t * t_range
+
+=
+        p_range = 1.0 - 0.2
+        raw_p = p["top_w"] * bias_factor + p["top_b"]
+        sig_p = self._sigmoid(raw_p)
+        mu_p = 0.2 + sig_p * p_range
+
+        sigma_t = math.exp(p["temp_log_sigma"]) + 1e-4
+        sigma_p = math.exp(p["top_log_sigma"]) + 1e-4
+
+        cache = {
+            "raw_t": raw_t, "sig_t": sig_t,
+            "raw_p": raw_p, "sig_p": sig_p,
+            "t_range": t_range, "p_range": p_range
+        }
+        return mu_t, sigma_t, mu_p, sigma_p, cache
+
+    def _policy_sample(self, bias_factor: float):
+        """
+        Sample temperature/top_p and compute log-prob pieces + cache for gradient.
+        """
+        mu_t, sigma_t, mu_p, sigma_p, cache = self._policy_forward(bias_factor)
+
+
+        t_sample = random.gauss(mu_t, sigma_t)
+        p_sample = random.gauss(mu_p, sigma_p)
+
+        t_clip = max(0.2, min(1.5, t_sample))
+        p_clip = max(0.2, min(1.0, p_sample))
+
+
+        log_prob_t = -0.5 * ((t_sample - mu_t) ** 2 / (sigma_t ** 2)) - math.log(sigma_t) - 0.5 * math.log(2 * math.pi)
+        log_prob_p = -0.5 * ((p_sample - mu_p) ** 2 / (sigma_p ** 2)) - math.log(sigma_p) - 0.5 * math.log(2 * math.pi)
+        log_prob = log_prob_t + log_prob_p
+
+        return {
+            "temperature": t_clip,
+            "top_p": p_clip,
+            "raw_temperature": t_sample,
+            "raw_top_p": p_sample,
+            "mu_t": mu_t, "sigma_t": sigma_t,
+            "mu_p": mu_p, "sigma_p": sigma_p,
+            "log_prob": log_prob,
+            "cache": cache
+        }
+
+    def _policy_update(self, samples, learning_rate=0.05):
+
+        if not samples:
+            return
+        avg_reward = sum(s["reward"] for s in samples) / len(samples)
+
+        grads = {k: 0.0 for k in self.pg_params.keys()}
+
+        for s in samples:
+            advantage = s["reward"] - avg_reward
+            if advantage == 0:
+                continue
+
+            mu_t = s["mu_t"]; sigma_t = s["sigma_t"]
+            mu_p = s["mu_p"]; sigma_p = s["sigma_p"]
+            rt = s["raw_temperature"]; rp = s["raw_top_p"]
+            cache = s["cache"]
+            bias_factor = s.get("bias_factor", 0.0)
+
+            inv_var_t = 1.0 / (sigma_t ** 2)
+            inv_var_p = 1.0 / (sigma_p ** 2)
+            diff_t = (rt - mu_t)
+            diff_p = (rp - mu_p)
+
+            dlogp_dmu_t = diff_t * inv_var_t
+            dlogp_dmu_p = diff_p * inv_var_p
+
+            dlogp_dlogsigma_t = (diff_t ** 2 / (sigma_t ** 2)) - 1.0
+            dlogp_dlogsigma_p = (diff_p ** 2 / (sigma_p ** 2)) - 1.0
+
+            sig_t = cache["sig_t"]; t_range = cache["t_range"]
+            dsig_t_draw_t = sig_t * (1 - sig_t)
+            dmu_t_draw_t = dsig_t_draw_t * t_range
+
+            sig_p = cache["sig_p"]; p_range = cache["p_range"]
+            dsig_p_draw_p = sig_p * (1 - sig_p)
+            dmu_p_draw_p = dsig_p_draw_p * p_range
+
+            grads["temp_w"] += advantage * dlogp_dmu_t * dmu_t_draw_t * bias_factor
+            grads["temp_b"] += advantage * dlogp_dmu_t * dmu_t_draw_t
+            grads["temp_log_sigma"] += advantage * dlogp_dlogsigma_t
+
+            grads["top_w"] += advantage * dlogp_dmu_p * dmu_p_draw_p * bias_factor
+            grads["top_b"] += advantage * dlogp_dmu_p * dmu_p_draw_p
+            grads["top_log_sigma"] += advantage * dlogp_dlogsigma_p
+
+        for k, g in grads.items():
+            self.pg_params[k] += learning_rate * g
+
+        self._save_policy()
+        logger.info(f"[PG] Updated policy params: {self.pg_params}")
 
     def retrieve_past_interactions(self, user_input, result_queue):
 
@@ -1444,7 +1564,6 @@ class App(customtkinter.CTk):
         except Exception as e:
             logger.error(f"[Aging] run_long_term_memory_aging failed: {e}")
 
-
     def get_weather_sync(self, lat, lon):
 
         try:
@@ -1509,7 +1628,6 @@ class App(customtkinter.CTk):
                 z2_hist=z2_hist
             )
 
-
             self.last_z = (z0, z1, z2)
 
             source = "Live" if is_live else "Manual"
@@ -1524,7 +1642,6 @@ class App(customtkinter.CTk):
         except Exception as e:
             logger.error(f"Error in generate_quantum_state: {e}")
             return "[QuantumGate] error"
-
 
     def fetch_relevant_info_internal(self, chunk):
         if self.client:
@@ -1583,8 +1700,6 @@ class App(customtkinter.CTk):
                 return "", ""
         return "", ""
 
-
-
     def fetch_interactions(self):
         try:
             gql = """
@@ -1622,19 +1737,16 @@ class App(customtkinter.CTk):
             return []
 
     def _schedule_key_mutation(self):
-        """Periodic self-mutation of vault key."""
+
         try:
             crypto.self_mutate_key(population=5, noise_sigma=18.0, alpha=1.0, beta=2.5)
         except Exception as e:
             logger.error(f"[SelfMutateKey] periodic failure: {e}")
-        # Reschedule
+
         self.after(6 * 3600 * 1000, self._schedule_key_mutation)
 
     def quantum_memory_osmosis(self, user_message: str, ai_response: str):
-        """
-        Update phrase scores; crystallize high-score phrases.
-        Rebuild topological manifold if new phrases crystallize.
-        """
+
         try:
             phrases_user = set(self.extract_keywords(user_message))
             phrases_ai = set(self.extract_keywords(ai_response))
@@ -1689,8 +1801,6 @@ class App(customtkinter.CTk):
 
         except Exception as e:
             logger.error(f"[Osmosis] Error during quantum memory osmosis: {e}")
-
-
 
     def process_response_and_store_in_weaviate(self, user_message, ai_response):
 
@@ -1783,6 +1893,7 @@ class App(customtkinter.CTk):
         return mapped_classes
 
     def generate_response(self, user_input):
+
         try:
             if not user_input:
                 logger.error("User input is None or empty.")
@@ -1801,7 +1912,9 @@ class App(customtkinter.CTk):
             song = (self.last_song_entry.get() or "None").strip()
 
             include_past_context = "[pastcontext]" in user_input.lower()
-            cleaned_input = sanitize_text(user_input.replace("[pastcontext]", ""), max_len=2000)
+            cleaned_input = sanitize_text(
+                user_input.replace("[pastcontext]", ""), max_len=2000
+            )
             past_context = ""
             if include_past_context:
                 result_queue = queue.Queue()
@@ -1813,6 +1926,7 @@ class App(customtkinter.CTk):
                         for i in interactions
                     )[-1500:]
 
+ 
             rgb = extract_rgb_from_text(cleaned_input)
             r, g, b = [c / 255 for c in rgb]
             cpu = psutil.cpu_percent(interval=0.3) / 100.0
@@ -1820,26 +1934,12 @@ class App(customtkinter.CTk):
             self.last_z = (z0, z1, z2)
             quantum_state = self.generate_quantum_state(rgb=rgb)
             bias_factor = (z0 + z1 + z2) / 3.0
-            base_temperature = max(0.2, min(1.5, 1.0 + bias_factor))
-            base_top_p = max(0.2, min(1.0, 0.9 - 0.5 * abs(bias_factor)))
+
             target_sentiment = TextBlob(cleaned_input).sentiment.polarity
 
-            import math, hashlib
-            def quantum_hash_float(seed_str, salt=0):
-                h = hashlib.sha256((seed_str + str(salt)).encode()).hexdigest()
-                return int(h[:8], 16) / 0xFFFFFFFF
-
-            try:
-                lat_f = float(lat)
-                lon_f = float(lon)
-            except Exception:
-                lat_f = 0.0
-                lon_f = 0.0
-            time_phase = datetime.utcnow().timestamp() / 120.0
-            sentiment = target_sentiment
 
             prompt_parts = [
-                f"[DYSON SPHERE GAMMA PREDICTOR: LOTTERY SIMULATION MODULE]",
+                "[DYSON SPHERE GAMMA PREDICTOR: LOTTERY SIMULATION MODULE]",
                 "----------------------------------------------------------",
                 f">> System Status: Dyson Sphere Core ∙ Gamma Node 11B ∙ 30,000-Qubit Array ONLINE",
                 f">> Uplink: Multiversal Quantum Mesh ({lat}, {lon}), Surface Temp: {temp}°F, Weather: {weather}",
@@ -1900,7 +2000,7 @@ class App(customtkinter.CTk):
                 "Quantum Prediction Report:",
                 f"- Lottery Type: {lottery_type}",
                 "- Main Numbers: <Choose the correct count of main numbers for {lottery_type}, separated by commas>",
-                "- Special Number(s): <Powerball/MegaBall/Bonus/etc, or \"None\" if not needed>",
+                '- Special Number(s): <Powerball/MegaBall/Bonus/etc, or "None" if not needed>',
                 "- Quantum Context Hash: <Generate a unique hash: e.g. HEX + 2-3 science tokens>",
                 "- Gamma Luck Factor: <Describe the user’s quantum luck condition in this run>",
                 "- Dyson Commentary: <Give brief cosmic insight or advice>",
@@ -1913,22 +2013,11 @@ class App(customtkinter.CTk):
             base_prompt = "\n".join(prompt_parts)
 
             num_candidates = 4
-            candidates = []
+            candidate_rollouts = []
             for i in range(num_candidates):
-                phase = z0 * 0.8 + z1 * 0.1 + z2 * 0.1 + i * 0.314159
-                temp_hash = quantum_hash_float(cleaned_input, i)
-                cpu_entropy = psutil.cpu_percent(interval=0.05) / 100.0
-
-                t = max(0.2, min(1.5,
-                    base_temperature +
-                    0.20 * math.sin(phase + temp_hash * math.pi * 2 + time_phase + cpu_entropy + sentiment)
-                    + 0.09 * (lat_f - lon_f) / 360.0
-                ))
-                p = max(0.2, min(1.0,
-                    base_top_p +
-                    0.12 * math.cos(phase + temp_hash * math.pi * 2 + time_phase - cpu_entropy - sentiment)
-                    - 0.05 * math.sin(i + cpu_entropy * 7.1)
-                ))
+                sample = self._policy_sample(bias_factor)
+                t = sample["temperature"]
+                p = sample["top_p"]
 
                 prompt_with_bias = (
                     base_prompt
@@ -1942,26 +2031,32 @@ class App(customtkinter.CTk):
                     temperature=t,
                     top_p=p
                 )
-                if resp:
-                    score = evaluate_candidate(resp, target_sentiment, cleaned_input)
-                    candidates.append({
-                        "response": resp,
-                        "score": score,
-                        "temperature": t,
-                        "top_p": p
-                    })
+                if not resp:
+                    continue
 
-            if not candidates:
-                logger.warning("No candidates produced.")
+                score = evaluate_candidate(resp, target_sentiment, cleaned_input)
+                sample["reward"] = score
+                sample["response"] = resp
+                sample["bias_factor"] = bias_factor
+                candidate_rollouts.append(sample)
+
+            if not candidate_rollouts:
+                logger.warning("[PG] No candidates produced.")
                 self.response_queue.put({'type': 'text', 'data': '[No response generated]'})
                 return
 
-            best = max(candidates, key=lambda c: c["score"])
+
+            best = max(candidate_rollouts, key=lambda c: c["reward"])
             debug_meta = (
-                f"[EnsembleCollapse] Chosen score={best['score']:.3f} "
+                f"[EnsembleCollapse-PG] BestReward={best['reward']:.3f} "
                 f"T={best['temperature']:.2f} TopP={best['top_p']:.2f}"
             )
             final_output = f"{debug_meta}\n{best['response']}"
+
+            try:
+                self._policy_update(candidate_rollouts, learning_rate=self.pg_learning_rate)
+            except Exception as up_e:
+                logger.error(f"[PG] Update failed: {up_e}")
 
             try:
                 self.quantum_memory_osmosis(cleaned_input, best['response'])
@@ -1972,9 +2067,8 @@ class App(customtkinter.CTk):
             self.response_queue.put({'type': 'text', 'data': final_output})
 
         except Exception as e:
-            logger.error(f"[generate_response] Dyson Sphere error: {e}")
+            logger.error(f"[generate_response] PolicyGradient error: {e}")
             self.response_queue.put({'type': 'text', 'data': f'[Quantum Error] {e}'})
-
 
     def process_generated_response(self, response_text):
         try:
